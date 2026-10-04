@@ -538,6 +538,18 @@ export class MysqlStore implements StudyStore {
     return true;
   }
 
+  async saveSpellingAttempt(input: { userId: string; contentItemId: string; contentVersion: number; answerText: string; correct: boolean; idempotencyKey: string }) {
+    const id = randomUUID();
+    try {
+      await this.pool.execute(`INSERT INTO spelling_attempts (id, user_id, content_item_id, content_version, answer_text, is_correct, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?)`, [id, input.userId, input.contentItemId, input.contentVersion, input.answerText, input.correct, input.idempotencyKey]);
+      return { id, correct: input.correct, duplicate: false };
+    } catch (cause) {
+      if (!isDuplicateKey(cause)) throw cause;
+      const [rows] = await this.pool.execute<Array<RowDataPacket & { id: string; is_correct: number }>>(`SELECT id, is_correct FROM spelling_attempts WHERE idempotency_key = ? LIMIT 1`, [input.idempotencyKey]);
+      return { id: rows[0].id, correct: Boolean(rows[0].is_correct), duplicate: true };
+    }
+  }
+
   async getDailyTasks(userId: string, planDate: string, tier: UserAccount['planTier']): Promise<DailyTaskState[]> {
     const definitions = dailyTaskDefinitions(tier);
     for (const task of definitions) {
@@ -773,6 +785,12 @@ export class MysqlStore implements StudyStore {
       [new Date(weekStart), team.id],
     );
     return { team, members: memberRows.map(row => ({ userId: row.user_id, nickname: row.nickname, planTier: row.plan_tier, points: Number(row.points), role: row.role })) };
+  }
+
+  async createReaction(teamId: string, senderId: string, receiverId: string, messageKey: string) {
+    const reaction = { id: randomUUID(), createdAt: new Date().toISOString() };
+    await this.pool.execute(`INSERT INTO reactions (id, team_id, sender_id, receiver_id, message_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`, [reaction.id, teamId, senderId, receiverId, messageKey, new Date(reaction.createdAt)]);
+    return reaction;
   }
 
   async createChallenge(input: Omit<ChallengeRecord, 'id' | 'createdAt' | 'status'>): Promise<ChallengeRecord> {

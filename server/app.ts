@@ -240,6 +240,18 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       return json({ accepted: true }, 201, undefined, corsOrigin);
     }
 
+    if (request.method === 'POST' && path === '/api/spelling-attempts') {
+      const user = await auth.requireUser(request);
+      const body = await readJson(request);
+      const question = typeof body?.content_item_id === 'string' ? questionById.get(body.content_item_id) : undefined;
+      if (!question || !question.id.startsWith('w-') || body?.content_version !== question.version || typeof body.answer_text !== 'string' || typeof body.idempotency_key !== 'string') return error('INVALID_SPELLING_ATTEMPT', '拼写作答信息无效。', 422, undefined, corsOrigin);
+      const answer = body.answer_text.trim().toLowerCase();
+      const correct = answer === question.word.toLowerCase();
+      const saved = await store.saveSpellingAttempt({ userId: user.id, contentItemId: question.id, contentVersion: question.version, answerText: body.answer_text.trim(), correct, idempotencyKey: body.idempotency_key });
+      if (!saved.duplicate) await store.updateReviewState(user.id, question.id, 'spelling', saved.correct, new Date().toISOString());
+      return json({ accepted: true, duplicate: saved.duplicate, attempt_id: saved.id, feedback: { correct: saved.correct, correct_answer: question.word } }, 200, undefined, corsOrigin);
+    }
+
     if (request.method === 'POST' && path === '/api/open-submissions') {
       const user = await auth.requireUser(request);
       const body = await readJson(request);
@@ -343,6 +355,19 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const overview = await store.getTeamOverview(user.id, weekStartUtc());
       if (!overview || overview.team.id !== leaderboardMatch[1]) return error('TEAM_FORBIDDEN', '你不是该小队成员。', 403, undefined, corsOrigin);
       return json({ week_start: weekStartUtc(), ...overview }, 200, undefined, corsOrigin);
+    }
+
+    const reactionMatch = path.match(/^\/api\/teams\/([^/]+)\/reactions$/);
+    if (request.method === 'POST' && reactionMatch) {
+      const user = await auth.requireUser(request);
+      const overview = await store.getTeamOverview(user.id, weekStartUtc());
+      if (!overview || overview.team.id !== reactionMatch[1]) return error('TEAM_FORBIDDEN', '你不是该小队成员。', 403, undefined, corsOrigin);
+      const body = await readJson(request);
+      const messageKey = body?.message_key;
+      const receiverId = body?.receiver_id;
+      if (typeof receiverId !== 'string' || !overview.members.some(member => member.userId === receiverId) || !['keep-going', 'great-job', 'study-together'].includes(String(messageKey))) return error('INVALID_REACTION', '鼓励对象或内容无效。', 422, undefined, corsOrigin);
+      const reaction = await store.createReaction(overview.team.id, user.id, receiverId, String(messageKey));
+      return json({ reaction }, 201, undefined, corsOrigin);
     }
 
     if (request.method === 'POST' && path === '/api/challenges') {
@@ -514,7 +539,8 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (!body) return error('INVALID_JSON', '请求体必须是有效 JSON。', 400);
       const source = typeof body.source === 'string' ? body.source : 'due_reviews';
       const mode: SessionMode = body.mode === 'challenge' ? 'challenge' : 'practice';
-      const session = await store.createSession({ userId: user.id, source, mode, questionIds: questions.slice(0, 5).map(question => question.id) });
+      const selectedQuestions = source === 'listening' ? questions.filter(question => question.id.startsWith('l-')) : source === 'reading' ? questions.filter(question => question.id.startsWith('r-')) : questions.filter(question => question.id.startsWith('w-')).slice(0, 5);
+      const session = await store.createSession({ userId: user.id, source, mode, questionIds: selectedQuestions.map(question => question.id) });
       return json({ session: { ...session, questions: session.questionIds.map(publicQuestion) } }, 201, undefined, corsOrigin);
     }
 
@@ -574,8 +600,9 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const correct = attempts.filter(attempt => attempt.correct).length;
       const finishedAll = attempts.length === session.questionIds.length;
       const now = new Date().toISOString();
-      for (const attempt of attempts) await store.updateReviewState(user.id, attempt.questionId, 'meaning', attempt.correct, now);
-      const taskKey = session.source === 'new_words' ? 'new_words' : session.source === 'game' ? 'game' : 'review';
+      const reviewSkill = session.source === 'listening' ? 'listening' : session.source === 'reading' ? 'reading' : 'meaning';
+      for (const attempt of attempts) await store.updateReviewState(user.id, attempt.questionId, reviewSkill, attempt.correct, now);
+      const taskKey = session.source === 'new_words' ? 'new_words' : session.source === 'game' ? 'game' : session.source === 'listening' || session.source === 'reading' ? 'input' : 'review';
       const tier = await store.getPlanTier(user.id, shanghaiDate());
       const tasks = await store.incrementDailyTask(user.id, shanghaiDate(), taskKey, attempts.length, tier);
       const task = tasks.find(item => item.key === taskKey);
@@ -598,7 +625,8 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
     } catch (cause) {
       if (cause instanceof AuthError) return error(cause.code, cause.message, cause.status, undefined, corsOrigin);
       if (cause instanceof UploadError) return error(cause.code, cause.message, cause.status, undefined, corsOrigin);
-      throw cause;
+      console.error(cause);
+      return error('INTERNAL_ERROR', '服务器内部错误。', 500, undefined, corsOrigin);
     }
   }
 

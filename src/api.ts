@@ -102,10 +102,10 @@ export interface FinishResponse {
   reward: { points: number; awarded: boolean; reward_key?: string; reason?: string };
 }
 
-export function createStudySession(): Promise<StudySessionResponse> {
+export function createStudySession(source = 'due_reviews'): Promise<StudySessionResponse> {
   return request('/api/study/sessions', {
     method: 'POST',
-    body: JSON.stringify({ source: 'due_reviews', mode: 'practice' }),
+    body: JSON.stringify({ source, mode: 'practice' }),
   });
 }
 
@@ -123,6 +123,10 @@ export function submitSessionAnswer(sessionId: string, question: Question, answe
       idempotency_key: idempotencyKey,
     }),
   });
+}
+
+export function submitSpellingAttempt(question: Question, answerText: string, idempotencyKey: string): Promise<{ feedback: { correct: boolean; correct_answer: string }; duplicate: boolean }> {
+  return request('/api/spelling-attempts', { method: 'POST', body: JSON.stringify({ content_item_id: question.id, content_version: question.version, answer_text: answerText, idempotency_key: idempotencyKey }) });
 }
 
 export function finishStudySession(sessionId: string): Promise<FinishResponse> {
@@ -171,6 +175,10 @@ export function createTeam(name: string): Promise<{ team: TeamOverview['team'] }
 
 export function joinTeam(inviteCode: string): Promise<{ team: TeamOverview['team'] }> {
   return request('/api/teams/join', { method: 'POST', body: JSON.stringify({ invite_code: inviteCode }) });
+}
+
+export function sendTeamReaction(teamId: string, receiverId: string): Promise<{ reaction: { id: string } }> {
+  return request(`/api/teams/${teamId}/reactions`, { method: 'POST', body: JSON.stringify({ receiver_id: receiverId, message_key: 'keep-going' }) });
 }
 
 export interface ChallengeSummary {

@@ -58,6 +58,7 @@ export interface StudyStore {
   listCollections(userId: string, kind?: string): Promise<CollectionEntry[]>;
   addCollection(input: Omit<CollectionEntry, 'id' | 'createdAt'>): Promise<CollectionEntry>;
   saveCorrection(userId: string, attemptId: string, correctedAnswer: unknown, selfCheck?: Record<string, boolean>): Promise<boolean>;
+  saveSpellingAttempt(input: { userId: string; contentItemId: string; contentVersion: number; answerText: string; correct: boolean; idempotencyKey: string }): Promise<{ id: string; correct: boolean; duplicate: boolean }>;
   getDailyTasks(userId: string, planDate: string, tier: UserAccount['planTier']): Promise<DailyTaskState[]>;
   incrementDailyTask(userId: string, planDate: string, taskKey: DailyTaskState['key'], amount: number, tier: UserAccount['planTier']): Promise<DailyTaskState[]>;
   saveOpenSubmission(input: Omit<OpenSubmission, 'id' | 'createdAt'>): Promise<OpenSubmission>;
@@ -73,6 +74,7 @@ export interface StudyStore {
   createTeam(input: { name: string; ownerId: string; inviteCode: string; inviteExpiresAt: string }): Promise<TeamRecord>;
   joinTeam(inviteCode: string, userId: string): Promise<TeamRecord | undefined>;
   getTeamOverview(userId: string, weekStart: string): Promise<{ team: TeamRecord; members: Array<{ userId: string; nickname: string; planTier: UserAccount['planTier']; points: number; role: 'owner' | 'member' }> } | undefined>;
+  createReaction(teamId: string, senderId: string, receiverId: string, messageKey: string): Promise<{ id: string; createdAt: string }>;
   createChallenge(input: Omit<ChallengeRecord, 'id' | 'createdAt' | 'status'>): Promise<ChallengeRecord>;
   listChallenges(teamId: string): Promise<ChallengeRecord[]>;
   getChallenge(challengeId: string): Promise<ChallengeRecord | undefined>;
@@ -103,6 +105,7 @@ export class InMemoryStore implements StudyStore {
   readonly reviews = new Map<string, ReviewState>();
   readonly collections = new Map<string, CollectionEntry>();
   readonly corrections = new Map<string, { userId: string; correctedAnswer: unknown; selfCheck?: Record<string, boolean>; createdAt: string }>();
+  readonly spellingAttempts = new Map<string, { id: string; userId: string; contentItemId: string; contentVersion: number; answerText: string; correct: boolean; idempotencyKey: string; submittedAt: string }>();
   readonly dailyTasks = new Map<string, DailyTaskState[]>();
   readonly openSubmissions = new Map<string, OpenSubmission>();
   readonly pendingPlans = new Map<string, { tier: UserAccount['planTier']; effectiveDate: string; examDate?: string }>();
@@ -113,6 +116,7 @@ export class InMemoryStore implements StudyStore {
   readonly teams = new Map<string, TeamRecord>();
   readonly memberships = new Map<string, { teamId: string; userId: string; role: 'owner' | 'member'; status: 'active' | 'left' | 'removed'; joinedAt: string }>();
   readonly challenges = new Map<string, ChallengeRecord>();
+  readonly reactions = new Map<string, { id: string; teamId: string; senderId: string; receiverId: string; messageKey: string; createdAt: string }>();
   readonly participations = new Map<string, ChallengeParticipation>();
   readonly assets = new Map<string, AssetRecord>();
   readonly imports = new Map<string, ImportRecord>();
@@ -274,6 +278,14 @@ export class InMemoryStore implements StudyStore {
     return true;
   }
 
+  async saveSpellingAttempt(input: { userId: string; contentItemId: string; contentVersion: number; answerText: string; correct: boolean; idempotencyKey: string }) {
+    const previous = [...this.spellingAttempts.values()].find(item => item.idempotencyKey === input.idempotencyKey);
+    if (previous) return { id: previous.id, correct: previous.correct, duplicate: true };
+    const attempt = { ...input, id: randomUUID(), submittedAt: new Date().toISOString() };
+    this.spellingAttempts.set(attempt.id, attempt);
+    return { id: attempt.id, correct: attempt.correct, duplicate: false };
+  }
+
   async getDailyTasks(userId: string, planDate: string, tier: UserAccount['planTier']): Promise<DailyTaskState[]> {
     const key = `${userId}:${planDate}`;
     const existing = this.dailyTasks.get(key);
@@ -395,6 +407,12 @@ export class InMemoryStore implements StudyStore {
       return { userId: item.userId, nickname: user?.nickname ?? '学习伙伴', planTier: user?.planTier ?? 'standard', points, role: item.role };
     }).sort((a, b) => b.points - a.points);
     return { team, members };
+  }
+
+  async createReaction(teamId: string, senderId: string, receiverId: string, messageKey: string) {
+    const reaction = { id: randomUUID(), teamId, senderId, receiverId, messageKey, createdAt: new Date().toISOString() };
+    this.reactions.set(reaction.id, reaction);
+    return { id: reaction.id, createdAt: reaction.createdAt };
   }
 
   async createChallenge(input: Omit<ChallengeRecord, 'id' | 'createdAt' | 'status'>): Promise<ChallengeRecord> {

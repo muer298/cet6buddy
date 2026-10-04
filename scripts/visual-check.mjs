@@ -24,7 +24,7 @@ page.on('response', response => {
 });
 
 await page.goto('http://127.0.0.1:4173/#login', { waitUntil: 'networkidle' });
-await page.locator('input[type="email"]').fill('visual-admin@cet6.local');
+await page.locator('input[type="email"]').fill(process.env.E2E_EMAIL ?? 'visual-admin@cet6.local');
 await page.getByRole('button', { name: '获取验证码' }).click();
 await page.getByText('本地开发验证码已自动填入。').waitFor();
 await page.getByRole('button', { name: '验证并登录' }).click();
@@ -47,6 +47,22 @@ for (const route of allRoutes) {
 await page.goto('http://127.0.0.1:4173/#upload', { waitUntil: 'networkidle' });
 await page.locator('input[type="file"]').setInputFiles({ name: 'visual.png', mimeType: 'image/png', buffer: Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,0]) });
 await page.getByText('上传完成，已进入人工整理队列。').waitFor();
+
+await page.goto('http://127.0.0.1:4173/#listening', { waitUntil: 'networkidle' });
+await page.locator('.option').nth(1).click();
+await page.getByRole('button', { name: '提交听力答案' }).click();
+await page.locator('.answer-feedback').waitFor();
+
+await page.goto('http://127.0.0.1:4173/#reading', { waitUntil: 'networkidle' });
+await page.getByRole('button', { name: '题目' }).click();
+await page.locator('.option').nth(1).click();
+await page.getByRole('button', { name: '提交阅读答案' }).click();
+await page.getByText('解析：').waitFor();
+
+await page.goto('http://127.0.0.1:4173/#translation', { waitUntil: 'networkidle' });
+await page.locator('textarea').fill('Cultural heritage strengthens a shared sense of identity.');
+await page.getByRole('button', { name: '保存作品与自检' }).click();
+await page.getByText(/作品已保存/).waitFor();
 
 await page.goto('http://127.0.0.1:4173/#word', { waitUntil: 'networkidle' });
 for (const correctIndex of [1, 0, 1, 1, 1]) {
@@ -71,5 +87,5 @@ await page.goto('http://127.0.0.1:4173/#admin', { waitUntil: 'networkidle' });
 await page.waitForTimeout(400);
 await page.screenshot({ path: fileURLToPath(new URL('admin.png', output)), fullPage: true });
 
-console.log(JSON.stringify({ routesChecked: allRoutes.length + 1, uploadChecked: true, screenshots: 8, errors }, null, 2));
+console.log(JSON.stringify({ routesChecked: allRoutes.length + 1, learningFlowsChecked: ['word', 'listening', 'reading', 'translation'], uploadChecked: true, screenshots: 8, errors }, null, 2));
 await browser.close();

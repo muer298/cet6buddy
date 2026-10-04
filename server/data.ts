@@ -11,6 +11,8 @@ export const questions: ServerQuestion[] = [
   { id: 'w-allocate', version: 1, word: 'allocate', phonetic: '/ˈæləkeɪt/', prompt: '选择正确释义', options: ['分配', '拒绝', '评价', '隐藏'], correctIndex: 0, explanation: '常用于 allocate time、resources 或 funds。' },
   { id: 'w-prevalent', version: 1, word: 'prevalent', phonetic: '/ˈprevələnt/', prompt: '选择正确释义', options: ['罕见的', '流行的；普遍存在的', '短期的', '精确的'], correctIndex: 1, explanation: '用于描述某种现象在特定群体或地区普遍存在。' },
   { id: 'w-reinforce', version: 1, word: 'reinforce', phonetic: '/ˌriːɪnˈfɔːs/', prompt: '选择正确释义', options: ['削弱', '推迟', '强化；巩固', '复制'], correctIndex: 2, explanation: '可表示强化结构，也可表示巩固观点、行为或印象。' },
+  { id: 'l-small-habits', version: 1, word: 'Small Habits', phonetic: 'Listening', prompt: 'What does the woman suggest?', options: ['She should make a complete change today.', 'She should begin with small consistent actions.', 'She should wait until she has more time.', 'She should ask someone else to decide.'], correctIndex: 1, explanation: '讲话者建议从小而持续的行动开始。' },
+  { id: 'r-small-habits', version: 1, word: 'Why Small Habits Matter', phonetic: 'Reading', prompt: 'Why do repeated actions become easier to maintain?', options: ['Because they require expensive equipment.', 'Because repetition makes behavior easier to maintain.', 'Because they eliminate the need for motivation.', 'Because they always produce immediate results.'], correctIndex: 1, explanation: '文章证据说明稳定情境中的重复会降低维持行为的难度。' },
 ];
 
 export const questionById = new Map(questions.map(question => [question.id, question]));

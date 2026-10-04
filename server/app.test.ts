@@ -206,6 +206,10 @@ test('team invitations and asynchronous challenge allow one ranked participation
   const memberRequest = (url: string, init: RequestInit = {}) => memberApp.handle(new Request(url, { ...init, headers: { cookie, ...init.headers } }));
   const joined = await memberRequest('http://local/api/teams/join', { method: 'POST', body: JSON.stringify({ invite_code: createdTeam.team.inviteCode }) });
   assert.equal(joined.status, 200);
+  const teamOverview = await body(await owner.request('http://local/api/teams/me'));
+  const memberId = teamOverview.overview.members.find((item: Record<string, unknown>) => item.nickname === 'member')?.userId;
+  const encouraged = await owner.request(`http://local/api/teams/${createdTeam.team.id}/reactions`, { method: 'POST', body: JSON.stringify({ receiver_id: memberId, message_key: 'keep-going' }) });
+  assert.equal(encouraged.status, 201);
 
   const challenge = await body(await owner.request('http://local/api/challenges', { method: 'POST', body: JSON.stringify({ game_type: 'root-chain', title: '周末词根挑战' }) }));
   const started = await body(await memberRequest(`http://local/api/challenges/${challenge.challenge.id}/start`, { method: 'POST' }));
@@ -298,4 +302,30 @@ test('checkin is server-gated by all required daily tasks', async () => {
   assert.equal(checked.checkin.checkinDate, date);
   const repeated = await body(await session.request('http://local/api/me/checkin', { method: 'POST', body: '{}' }));
   assert.equal(repeated.checkin.id, checked.checkin.id);
+});
+
+test('listening and reading use persisted first-answer sessions and input review skills', async () => {
+  const session = await authenticated('input@example.com');
+  for (const source of ['listening', 'reading'] as const) {
+    const created = await body(await session.request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ source, mode: 'practice' }) }));
+    assert.equal(created.session.questions.length, 1);
+    const question = created.session.questions[0];
+    const answer = await body(await session.request(`http://local/api/sessions/${created.session.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: 1, idempotency_key: `${source}-first` }) }));
+    assert.equal(answer.feedback.correct, true);
+    await session.request(`http://local/api/sessions/${created.session.id}/finish`, { method: 'POST', body: '{}' });
+  }
+  const reviews = await body(await session.request('http://local/api/me/reviews?due_before=2099-01-01T00:00:00.000Z'));
+  assert.ok(reviews.reviews.some((item: Record<string, unknown>) => item.skill === 'listening'));
+  assert.ok(reviews.reviews.some((item: Record<string, unknown>) => item.skill === 'reading'));
+});
+
+test('spelling attempts are stored separately and update the spelling review queue', async () => {
+  const session = await authenticated('spelling@example.com');
+  const first = await body(await session.request('http://local/api/spelling-attempts', { method: 'POST', body: JSON.stringify({ content_item_id: 'w-sustainable', content_version: 1, answer_text: 'sustanable', idempotency_key: 'spell-1' }) }));
+  assert.equal(first.feedback.correct, false);
+  const repeated = await body(await session.request('http://local/api/spelling-attempts', { method: 'POST', body: JSON.stringify({ content_item_id: 'w-sustainable', content_version: 1, answer_text: 'sustainable', idempotency_key: 'spell-1' }) }));
+  assert.equal(repeated.duplicate, true);
+  assert.equal(repeated.feedback.correct, false);
+  const reviews = await body(await session.request('http://local/api/me/reviews?due_before=2099-01-01T00:00:00.000Z'));
+  assert.ok(reviews.reviews.some((item: Record<string, unknown>) => item.skill === 'spelling'));
 });
