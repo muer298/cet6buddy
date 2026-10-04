@@ -1,70 +1,54 @@
-# CET6 Buddy UI Prototype
+# CET6 Buddy V1 试用版
 
-这是根据《六级学习伙伴 手机网页产品与开发说明 V1.0》构建的 React + TypeScript 前端工程。项目保留第一阶段 UI 视觉稿，并开始实现真实的学习业务闭环。
+CET6 Buddy 是一个移动优先的六级学习 Web App。当前仓库包含 React + TypeScript PWA、Node.js API、MySQL 前向迁移、原创试用内容、管理后台和腾讯云香港部署配置。
 
-## 运行
-
-安装依赖后，分别启动前端和 API：
+## 本地启动
 
 ```bash
 npm install
-npm run dev
+cp .env.example .env
+# 填写 .env；本地可使用 STORAGE_DRIVER=memory，持久化使用 mysql
+npm run db:check
+npm run db:migrate
+npm run content:seed
 npm run dev:api
+npm run dev
 ```
 
-打开 `http://localhost:4173`。建议用浏览器设备模式查看 390 × 844 的手机效果。
+打开 `http://127.0.0.1:4173`。开发环境可设置 `AUTH_EXPOSE_CODE=true` 自动填入验证码；生产环境必须关闭。`.env` 已被 Git 忽略，不得提交任何密码或腾讯云密钥。
 
-生产构建：
+## 已实现的业务闭环
+
+- 邮箱验证码登录、哈希验证码、发送限流、一次性消费、HttpOnly Cookie、learner/editor/admin 后端权限校验。
+- 服务端今日计划、次日生效、北京时间任务、1/3/7/14/30 日复习、收藏、首次答案、独立订正、跨设备会话恢复和每日 45 分账本上限。
+- 单词学习、听力音频与位置恢复、阅读切换、翻译/作文开放输出和本地离线草稿。
+- 词根串串、单词闪答、例句连胜的服务端计分；小队邀请、周榜和一次计榜的异步挑战。
+- 私有附件上传：本地开发保存或 COS 最小权限 STS 直传，真实 MIME、大小、摘要与所有者校验。
+- 内容/导入后台：字段校验、审核状态、不可变新版本、发布、下架和审计事件。
+- PWA Manifest、安装图标、Service Worker、应用外壳缓存和可控更新提示。登录、挑战、榜单和上传始终要求联网。
+
+## 内容与迁移
+
+`server/migrations/mysql/0001_initial.sql` 及后续迁移只向前执行，已经执行的历史文件不得修改。`content/pilot` 包含 204 个词汇条目、3 组原创听力、3 篇原创阅读、20 条翻译题和 20 个作文句式；`npm run content:seed` 可幂等导入 250 条内容记录。用户资料的结构化模板位于 `content/templates`。
+
+## 验证
 
 ```bash
 npm run typecheck
-npm run build
-```
-
-构建结果输出到 `dist/`。
-
-后端默认运行在 `http://127.0.0.1:8787`。开发模式下前端会自动连接该地址；部署时可通过 `VITE_API_BASE_URL` 调整。
-
-## MySQL 持久化
-
-默认仍使用零配置的内存存储。要连接电脑里的 MySQL：
-
-```bash
-cp .env.example .env
-# 编辑 .env：将 STORAGE_DRIVER 改为 mysql，并填写 DATABASE_URL 或 DB_* 配置
-mysql -u root -p -e "CREATE DATABASE cet6_buddy CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
-npm run db:check
-npm run db:migrate
-npm run dev:api
-```
-
-`.env` 已被 Git 忽略，不要把密码提交到仓库。部署线上时继续使用同一套迁移，只需把 `DATABASE_URL` 换为云 MySQL 地址；若云数据库要求 TLS，再设置 `DB_SSL=true`。本机数据不会自动同步到线上，需要数据时应单独执行导出和导入。
-
-## 已覆盖界面
-
-- 今日：每日计划、同步提示、任务进度和小队进度
-- 学习：单词、听力、阅读、翻译、作文句式
-- 闯关：词根串串、单词闪答、例句连胜、结果与订正
-- 小队：周榜、共同目标、异步同题挑战
-- 我的：打卡日历、学习资产、资料上传、目标设置
-- 账号：登录和首次计划设置
-- 管理后台：内容库、状态、版本和发布流程示意
-
-## 原型边界
-
-- 当前包含 React + TypeScript 前端和 Node TypeScript API，使用原创演示内容。
-- 单词模块已经接入真实 HTTP 接口，支持创建学习会话、冻结题目版本、逐题提交、首次答案锁定、幂等重试、订正反馈、结算与每日奖励防重复。
-- `server/migrations/0001_initial.sql` 保留 SQLite/D1 结构；`server/migrations/mysql/` 是实际 MySQL 迁移。
-- 后端支持内存或 MySQL 存储。内存模式重启会清空，MySQL 模式会持久保留学习会话、作答与积分。
-- 尚未接入真实登录、音频、文件存储、云同步或 PWA。
-- 游戏得分、学习积分和知识掌握数据在界面中保持为三种不同概念。
-- `app.js` 是第一阶段静态原型快照；正式入口为 `src/main.tsx`。
-- 下一阶段接入真实认证与用户权限，并继续保持幂等和内容版本约束。
-
-## API 测试
-
-```bash
 npm run test:server
+npm run build
+node scripts/visual-check.mjs
+npm audit --omit=dev
 ```
 
-测试覆盖健康检查、北京时间计划、CORS、答案不提前泄露、首次答案锁定、幂等提交、题目版本冲突与奖励防重复。
+浏览器脚本覆盖真实登录、19 个路由、360–430px 移动布局、私有上传和单词练习。正式邀请测试仍需在 iPhone Safari、安卓 Chrome、微信内浏览器以及目标跨境网络上人工验收。
+
+## 腾讯云部署
+
+部署文件位于 `deploy/`：Nginx 同域反向代理、systemd 服务、不可变 release、上一版本回滚和 MySQL 逻辑备份。正式环境使用香港轻量应用服务器、香港云 MySQL、COS 私有桶和 SES，并配置域名与 HTTPS。详细步骤见 [deploy/README.md](deploy/README.md)。
+
+上线前还必须完成腾讯云资源购买、SES 域名验证、COS 跨域规则、数据库自动备份和至少一次隔离恢复演练；这些需要真实云账号，仓库不会包含密钥。
+
+## V1 边界
+
+V1 不包含实时答题房间、OCR、AI 作文反馈、自动音频对齐、模拟考试和小岛装饰。开放表达只保存与自检，不做机械自动评分；未经许可的真题不得发布到公开题库。

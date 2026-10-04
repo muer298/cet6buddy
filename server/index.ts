@@ -3,6 +3,11 @@ import { createApp } from './app.ts';
 import { createStoreFromEnv } from './store-factory.ts';
 
 const runtime = await createStoreFromEnv();
+if (process.argv.includes('--check-config')) {
+  console.log(`CET6 Buddy configuration is valid; storage=${runtime.driver}`);
+  await runtime.store.close?.();
+  process.exit(0);
+}
 const { handle } = createApp(runtime.store);
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? '127.0.0.1';

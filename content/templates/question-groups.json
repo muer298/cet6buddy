@@ -1,0 +1,12 @@
+[
+  {
+    "kind": "reading",
+    "title": "题组标题",
+    "source": "来源或原创说明",
+    "visibility": "private",
+    "passage": "文章正文",
+    "questions": [
+      { "prompt": "题目", "options": ["A", "B", "C", "D"], "correct_index": 0, "explanation": "解析" }
+    ]
+  }
+]

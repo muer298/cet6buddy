@@ -6,6 +6,16 @@ export type Route =
 
 export type SyncState = 'synced' | 'submitting' | 'pending' | 'failed';
 
+export interface CurrentUser {
+  id: string;
+  email: string;
+  role: 'learner' | 'editor' | 'admin';
+  nickname: string;
+  planTier: 'light' | 'standard' | 'custom';
+  examDate?: string;
+  timezone: string;
+}
+
 export interface StudyTask {
   id: string;
   title: string;

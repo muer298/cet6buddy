@@ -6,6 +6,11 @@ export const questions: ServerQuestion[] = [
   { id: 'w-conventional', version: 2, word: 'conventional', phonetic: '/kənˈvenʃənl/', prompt: '选择正确释义', options: ['创新的', '传统的；常规的', '有争议的', '临时的'], correctIndex: 1, explanation: '常见搭配是 conventional methods 或 conventional wisdom。' },
   { id: 'w-alleviate', version: 1, word: 'alleviate', phonetic: '/əˈliːvieɪt/', prompt: '选择正确释义', options: ['加剧', '缓解', '忽略', '预测'], correctIndex: 1, explanation: '常用于 alleviate stress、pain 或 pressure。' },
   { id: 'w-substantial', version: 1, word: 'substantial', phonetic: '/səbˈstænʃl/', prompt: '选择正确释义', options: ['微不足道的', '大量的；实质性的', '不稳定的', '相似的'], correctIndex: 1, explanation: '可表示数量可观，也可表示重要或实质性的。' },
+  { id: 'w-compelling', version: 1, word: 'compelling', phonetic: '/kəmˈpelɪŋ/', prompt: '选择正确释义', options: ['令人信服的；引人注目的', '可以替换的', '偶然发生的', '容易忽略的'], correctIndex: 0, explanation: '常用于 compelling evidence、argument 或 story。' },
+  { id: 'w-deteriorate', version: 1, word: 'deteriorate', phonetic: '/dɪˈtɪəriəreɪt/', prompt: '选择正确释义', options: ['迅速扩张', '逐渐改善', '恶化；变坏', '保持稳定'], correctIndex: 2, explanation: '表示质量、状况或关系逐渐变差。' },
+  { id: 'w-allocate', version: 1, word: 'allocate', phonetic: '/ˈæləkeɪt/', prompt: '选择正确释义', options: ['分配', '拒绝', '评价', '隐藏'], correctIndex: 0, explanation: '常用于 allocate time、resources 或 funds。' },
+  { id: 'w-prevalent', version: 1, word: 'prevalent', phonetic: '/ˈprevələnt/', prompt: '选择正确释义', options: ['罕见的', '流行的；普遍存在的', '短期的', '精确的'], correctIndex: 1, explanation: '用于描述某种现象在特定群体或地区普遍存在。' },
+  { id: 'w-reinforce', version: 1, word: 'reinforce', phonetic: '/ˌriːɪnˈfɔːs/', prompt: '选择正确释义', options: ['削弱', '推迟', '强化；巩固', '复制'], correctIndex: 2, explanation: '可表示强化结构，也可表示巩固观点、行为或印象。' },
 ];
 
 export const questionById = new Map(questions.map(question => [question.id, question]));

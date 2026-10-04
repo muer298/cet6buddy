@@ -1,0 +1,5 @@
+[
+  {"id":"listen-habit","title":"Small Habits","transcript":"Small actions become easier when they are repeated in a stable context.","source":"CET6 Buddy 原创","questions":[{"prompt":"What does the speaker recommend?","options":["Changing everything at once","Repeating small actions","Waiting for motivation","Avoiding routines"],"correct_index":1,"explanation":"讲话者建议在稳定情境中重复小行动。"}]},
+  {"id":"listen-library","title":"Library Service","transcript":"Students can reserve a study room online, but they must confirm the booking within fifteen minutes.","source":"CET6 Buddy 原创","questions":[{"prompt":"What must students do?","options":["Pay a fee","Call the library","Confirm the booking","Bring two friends"],"correct_index":2,"explanation":"预约后十五分钟内需要确认。"}]},
+  {"id":"listen-project","title":"Project Meeting","transcript":"The team moved the meeting to Friday because the survey results would not be ready on Thursday.","source":"CET6 Buddy 原创","questions":[{"prompt":"Why was the meeting moved?","options":["A member was ill","The room was unavailable","The results were delayed","Friday was a holiday"],"correct_index":2,"explanation":"调查结果星期四无法准备好。"}]}
+]
