@@ -1,0 +1,30 @@
+{
+  "name": "cet6-buddy",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "node --env-file-if-exists=.env --watch server/index.ts",
+    "build": "tsc -b && node scripts/build.mjs && node scripts/build-server.mjs",
+    "preview": "vite preview",
+    "start:api": "node --env-file-if-exists=.env dist/server/index.js",
+    "db:check": "node --env-file-if-exists=.env server/check-db.ts",
+    "db:migrate": "node --env-file-if-exists=.env server/migrate.ts",
+    "test:server": "node --test server/app.test.ts",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "mysql2": "3.15.3",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.7.0",
+    "@types/react": "19.1.12",
+    "@types/react-dom": "19.1.9",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.2",
+    "vite": "7.1.7"
+  }
+}
