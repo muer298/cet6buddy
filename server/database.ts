@@ -52,8 +52,8 @@ export function createMysqlPool(env: NodeJS.ProcessEnv = process.env): Pool {
 }
 
 export async function verifyMysqlConnection(pool: Pool): Promise<{ version: string; database: string }> {
-  const [rows] = await pool.query<Array<{ version: string; database: string } & import('mysql2').RowDataPacket>>(
-    'SELECT VERSION() AS version, DATABASE() AS database',
+  const [rows] = await pool.query<Array<{ version: string; selected_database: string } & import('mysql2').RowDataPacket>>(
+    'SELECT VERSION() AS version, DATABASE() AS selected_database',
   );
-  return rows[0];
+  return { version: rows[0].version, database: rows[0].selected_database };
 }
