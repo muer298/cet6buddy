@@ -4,8 +4,11 @@ export type UserRole = 'learner' | 'editor' | 'admin';
 
 export interface UserAccount {
   id: string;
+  username: string;
   email: string;
   role: UserRole;
+  mustChangePassword: boolean;
+  status: 'active' | 'disabled';
   nickname: string;
   planTier: 'light' | 'standard' | 'custom';
   examDate?: string;
@@ -13,15 +16,9 @@ export interface UserAccount {
   createdAt: string;
 }
 
-export interface AuthCodeRecord {
-  id: string;
-  email: string;
-  codeHash: string;
-  requestIp: string;
-  expiresAt: string;
-  consumedAt?: string;
-  attemptCount: number;
-  createdAt: string;
+export interface PasswordCredential {
+  user: UserAccount;
+  passwordHash: string;
 }
 
 export interface AuthSessionRecord {

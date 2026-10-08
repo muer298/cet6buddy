@@ -24,10 +24,9 @@ page.on('response', response => {
 });
 
 await page.goto('http://127.0.0.1:4173/#login', { waitUntil: 'networkidle' });
-await page.locator('input[type="email"]').fill(process.env.E2E_EMAIL ?? 'visual-admin@cet6.local');
-await page.getByRole('button', { name: '获取验证码' }).click();
-await page.getByText('本地开发验证码已自动填入。').waitFor();
-await page.getByRole('button', { name: '验证并登录' }).click();
+await page.getByPlaceholder('用户名或 name@example.com').fill(process.env.E2E_IDENTIFIER ?? 'visual-admin');
+await page.getByPlaceholder('请输入密码').fill(process.env.E2E_PASSWORD ?? 'Visual-pass-2026');
+await page.getByRole('button', { name: '登录' }).click();
 await page.waitForURL(/#today$/);
 
 const allRoutes = [

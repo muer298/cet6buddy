@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AssetRecord, AuthCodeRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
+import type { AssetRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PasswordCredential, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
 
 const taskDefinitions: Record<UserAccount['planTier'], Array<Omit<DailyTaskState, 'completed'>>> = {
   light: [
@@ -42,13 +42,16 @@ export interface StudyStore {
   finishSession(sessionId: string): Promise<StudySession | undefined>;
   awardPoints(userId: string, rewardKey: string, points: number, reason: string): Promise<{ entry: PointEntry; awarded: boolean }>;
   findUserByEmail(email: string): Promise<UserAccount | undefined>;
+  findUserByUsername(username: string): Promise<UserAccount | undefined>;
   findUserById(userId: string): Promise<UserAccount | undefined>;
   createUser(email: string, nickname: string): Promise<UserAccount>;
-  countRecentAuthCodes(email: string, requestIp: string, since: string): Promise<{ email: number; ip: number }>;
-  createAuthCode(input: Omit<AuthCodeRecord, 'id' | 'attemptCount' | 'createdAt'>): Promise<AuthCodeRecord>;
-  latestAuthCode(email: string): Promise<AuthCodeRecord | undefined>;
-  incrementAuthCodeAttempts(codeId: string): Promise<void>;
-  consumeAuthCode(codeId: string, consumedAt: string): Promise<boolean>;
+  createPasswordUser(input: { username: string; email: string; nickname: string; role: UserRole; passwordHash: string; mustChangePassword: boolean }): Promise<UserAccount>;
+  findPasswordCredential(identifier: string): Promise<PasswordCredential | undefined>;
+  updatePassword(userId: string, passwordHash: string, mustChangePassword: boolean): Promise<UserAccount | undefined>;
+  listUsers(): Promise<UserAccount[]>;
+  revokeUserSessions(userId: string, revokedAt: string): Promise<void>;
+  countRateLimitEvents(scope: string, scopeKey: string, since: string): Promise<number>;
+  recordRateLimitEvent(scope: string, scopeKey: string): Promise<void>;
   createAuthSession(input: Omit<AuthSessionRecord, 'id' | 'createdAt' | 'lastSeenAt'>): Promise<AuthSessionRecord>;
   findAuthSession(tokenHash: string): Promise<AuthSessionRecord | undefined>;
   touchAuthSession(sessionId: string, seenAt: string): Promise<void>;
@@ -100,7 +103,8 @@ export class InMemoryStore implements StudyStore {
   readonly attemptBySessionQuestion = new Map<string, StoredAttempt>();
   readonly pointLedger = new Map<string, PointEntry>();
   readonly users = new Map<string, UserAccount>();
-  readonly authCodes = new Map<string, AuthCodeRecord>();
+  readonly passwordHashes = new Map<string, string>();
+  readonly rateLimitEvents: Array<{ scope: string; scopeKey: string; createdAt: string }> = [];
   readonly authSessions = new Map<string, AuthSessionRecord>();
   readonly reviews = new Map<string, ReviewState>();
   readonly collections = new Map<string, CollectionEntry>();
@@ -177,6 +181,10 @@ export class InMemoryStore implements StudyStore {
     return [...this.users.values()].find(user => user.email === email);
   }
 
+  async findUserByUsername(username: string): Promise<UserAccount | undefined> {
+    return [...this.users.values()].find(user => user.username === username);
+  }
+
   async findUserById(userId: string): Promise<UserAccount | undefined> {
     return this.users.get(userId);
   }
@@ -185,42 +193,51 @@ export class InMemoryStore implements StudyStore {
     const existing = await this.findUserByEmail(email);
     if (existing) return existing;
     const user: UserAccount = {
-      id: randomUUID(), email, nickname, role: 'learner', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt: new Date().toISOString(),
+      id: randomUUID(), username: email.split('@')[0], email, nickname, role: 'learner', mustChangePassword: true, status: 'active', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt: new Date().toISOString(),
     };
     this.users.set(user.id, user);
     return user;
   }
 
-  async countRecentAuthCodes(email: string, requestIp: string, since: string): Promise<{ email: number; ip: number }> {
-    const records = [...this.authCodes.values()].filter(record => record.createdAt >= since);
-    return {
-      email: records.filter(record => record.email === email).length,
-      ip: records.filter(record => record.requestIp === requestIp).length,
+  async createPasswordUser(input: { username: string; email: string; nickname: string; role: UserRole; passwordHash: string; mustChangePassword: boolean }): Promise<UserAccount> {
+    if (await this.findUserByEmail(input.email) || await this.findUserByUsername(input.username)) throw new Error('USER_ALREADY_EXISTS');
+    const user: UserAccount = {
+      id: randomUUID(), username: input.username, email: input.email, nickname: input.nickname, role: input.role,
+      mustChangePassword: input.mustChangePassword, status: 'active', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt: new Date().toISOString(),
     };
+    this.users.set(user.id, user);
+    this.passwordHashes.set(user.id, input.passwordHash);
+    return user;
   }
 
-  async createAuthCode(input: Omit<AuthCodeRecord, 'id' | 'attemptCount' | 'createdAt'>): Promise<AuthCodeRecord> {
-    const record: AuthCodeRecord = { ...input, id: randomUUID(), attemptCount: 0, createdAt: new Date().toISOString() };
-    this.authCodes.set(record.id, record);
-    return record;
+  async findPasswordCredential(identifier: string): Promise<PasswordCredential | undefined> {
+    const user = await this.findUserByEmail(identifier) ?? await this.findUserByUsername(identifier);
+    const passwordHash = user ? this.passwordHashes.get(user.id) : undefined;
+    return user && passwordHash ? { user, passwordHash } : undefined;
   }
 
-  async latestAuthCode(email: string): Promise<AuthCodeRecord | undefined> {
-    return [...this.authCodes.values()]
-      .filter(record => record.email === email && !record.consumedAt)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  async updatePassword(userId: string, passwordHash: string, mustChangePassword: boolean): Promise<UserAccount | undefined> {
+    const user = this.users.get(userId);
+    if (!user) return undefined;
+    this.passwordHashes.set(userId, passwordHash);
+    user.mustChangePassword = mustChangePassword;
+    return user;
   }
 
-  async incrementAuthCodeAttempts(codeId: string): Promise<void> {
-    const record = this.authCodes.get(codeId);
-    if (record) record.attemptCount += 1;
+  async listUsers(): Promise<UserAccount[]> {
+    return [...this.users.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  async consumeAuthCode(codeId: string, consumedAt: string): Promise<boolean> {
-    const record = this.authCodes.get(codeId);
-    if (!record || record.consumedAt) return false;
-    record.consumedAt = consumedAt;
-    return true;
+  async revokeUserSessions(userId: string, revokedAt: string): Promise<void> {
+    for (const session of this.authSessions.values()) if (session.userId === userId && !session.revokedAt) session.revokedAt = revokedAt;
+  }
+
+  async countRateLimitEvents(scope: string, scopeKey: string, since: string): Promise<number> {
+    return this.rateLimitEvents.filter(event => event.scope === scope && event.scopeKey === scopeKey && event.createdAt >= since).length;
+  }
+
+  async recordRateLimitEvent(scope: string, scopeKey: string): Promise<void> {
+    this.rateLimitEvents.push({ scope, scopeKey, createdAt: new Date().toISOString() });
   }
 
   async createAuthSession(input: Omit<AuthSessionRecord, 'id' | 'createdAt' | 'lastSeenAt'>): Promise<AuthSessionRecord> {

@@ -8,8 +8,11 @@ export type SyncState = 'synced' | 'submitting' | 'pending' | 'failed';
 
 export interface CurrentUser {
   id: string;
+  username: string;
   email: string;
   role: 'learner' | 'editor' | 'admin';
+  mustChangePassword: boolean;
+  status: 'active' | 'disabled';
   nickname: string;
   planTier: 'light' | 'standard' | 'custom';
   examDate?: string;

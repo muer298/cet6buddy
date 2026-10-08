@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
-import type { AssetRecord, AuthCodeRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
+import type { AssetRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PasswordCredential, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
 import { dailyTaskDefinitions, nextReviewInterval, type StudyStore } from './store.ts';
 
 interface SessionRow extends RowDataPacket {
@@ -37,23 +37,16 @@ interface PointRow extends RowDataPacket {
 
 interface UserRow extends RowDataPacket {
   id: string;
+  username: string;
   email: string;
   role: UserAccount['role'];
+  password_hash?: string | null;
+  must_change_password: number | boolean;
+  status: UserAccount['status'];
   nickname: string;
   plan_tier: UserAccount['planTier'];
   exam_date: string | null;
   timezone: string;
-  created_at: string | Date;
-}
-
-interface AuthCodeRow extends RowDataPacket {
-  id: string;
-  email: string;
-  code_hash: string;
-  request_ip: string;
-  expires_at: string | Date;
-  consumed_at: string | Date | null;
-  attempt_count: number;
   created_at: string | Date;
 }
 
@@ -118,25 +111,15 @@ function mapPoint(row: PointRow): PointEntry {
 function mapUser(row: UserRow): UserAccount {
   return {
     id: row.id,
+    username: row.username,
     email: row.email,
     role: row.role,
+    mustChangePassword: Boolean(row.must_change_password),
+    status: row.status,
     nickname: row.nickname,
     planTier: row.plan_tier,
     examDate: row.exam_date ?? undefined,
     timezone: row.timezone,
-    createdAt: timestamp(row.created_at),
-  };
-}
-
-function mapAuthCode(row: AuthCodeRow): AuthCodeRecord {
-  return {
-    id: row.id,
-    email: row.email,
-    codeHash: row.code_hash,
-    requestIp: row.request_ip,
-    expiresAt: timestamp(row.expires_at),
-    consumedAt: row.consumed_at ? timestamp(row.consumed_at) : undefined,
-    attemptCount: row.attempt_count,
     createdAt: timestamp(row.created_at),
   };
 }
@@ -331,7 +314,7 @@ export class MysqlStore implements StudyStore {
 
   async findUserByEmail(email: string): Promise<UserAccount | undefined> {
     const [rows] = await this.pool.execute<UserRow[]>(
-      `SELECT u.id, u.email, u.role, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
+      `SELECT u.id, u.username, u.email, u.role, u.must_change_password, u.status, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
          FROM users u JOIN profiles p ON p.user_id = u.id
         WHERE u.email = ? LIMIT 1`,
       [email],
@@ -339,9 +322,19 @@ export class MysqlStore implements StudyStore {
     return rows[0] ? mapUser(rows[0]) : undefined;
   }
 
+  async findUserByUsername(username: string): Promise<UserAccount | undefined> {
+    const [rows] = await this.pool.execute<UserRow[]>(
+      `SELECT u.id, u.username, u.email, u.role, u.must_change_password, u.status, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
+         FROM users u JOIN profiles p ON p.user_id = u.id
+        WHERE u.username = ? LIMIT 1`,
+      [username],
+    );
+    return rows[0] ? mapUser(rows[0]) : undefined;
+  }
+
   async findUserById(userId: string): Promise<UserAccount | undefined> {
     const [rows] = await this.pool.execute<UserRow[]>(
-      `SELECT u.id, u.email, u.role, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
+      `SELECT u.id, u.username, u.email, u.role, u.must_change_password, u.status, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
          FROM users u JOIN profiles p ON p.user_id = u.id
         WHERE u.id = ? LIMIT 1`,
       [userId],
@@ -357,7 +350,8 @@ export class MysqlStore implements StudyStore {
     const createdAt = new Date().toISOString();
     try {
       await connection.beginTransaction();
-      await connection.execute('INSERT INTO users (id, email, role, created_at) VALUES (?, ?, ?, ?)', [id, email, 'learner', new Date(createdAt)]);
+      const username = `legacy_${id.replaceAll('-', '').slice(0, 24)}`;
+      await connection.execute('INSERT INTO users (id, username, email, role, must_change_password, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', [id, username, email, 'learner', true, 'active', new Date(createdAt)]);
       await connection.execute(
         'INSERT INTO profiles (user_id, nickname, plan_tier, timezone) VALUES (?, ?, ?, ?)',
         [id, nickname, 'standard', 'Asia/Shanghai'],
@@ -367,7 +361,7 @@ export class MysqlStore implements StudyStore {
         [id, 'standard', 'Asia/Shanghai'],
       );
       await connection.commit();
-      return { id, email, nickname, role: 'learner', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt };
+      return { id, username, email, nickname, role: 'learner', mustChangePassword: true, status: 'active', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt };
     } catch (cause) {
       await connection.rollback();
       if (isDuplicateKey(cause)) {
@@ -380,45 +374,68 @@ export class MysqlStore implements StudyStore {
     }
   }
 
-  async countRecentAuthCodes(email: string, requestIp: string, since: string): Promise<{ email: number; ip: number }> {
-    const [rows] = await this.pool.execute<Array<RowDataPacket & { email_count: number; ip_count: number }>>(
-      `SELECT SUM(email = ?) AS email_count, SUM(request_ip = ?) AS ip_count
-         FROM auth_codes WHERE created_at >= ?`,
-      [email, requestIp, new Date(since)],
-    );
-    return { email: Number(rows[0]?.email_count ?? 0), ip: Number(rows[0]?.ip_count ?? 0) };
+  async createPasswordUser(input: { username: string; email: string; nickname: string; role: UserRole; passwordHash: string; mustChangePassword: boolean }): Promise<UserAccount> {
+    const connection = await this.pool.getConnection();
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    try {
+      await connection.beginTransaction();
+      await connection.execute(
+        'INSERT INTO users (id, username, email, role, password_hash, must_change_password, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, input.username, input.email, input.role, input.passwordHash, input.mustChangePassword, 'active', new Date(createdAt)],
+      );
+      await connection.execute('INSERT INTO profiles (user_id, nickname, plan_tier, timezone) VALUES (?, ?, ?, ?)', [id, input.nickname, 'standard', 'Asia/Shanghai']);
+      await connection.execute('INSERT INTO user_settings (user_id, current_plan_tier, timezone) VALUES (?, ?, ?)', [id, 'standard', 'Asia/Shanghai']);
+      await connection.commit();
+      return { id, username: input.username, email: input.email, nickname: input.nickname, role: input.role, mustChangePassword: input.mustChangePassword, status: 'active', planTier: 'standard', timezone: 'Asia/Shanghai', createdAt };
+    } catch (cause) {
+      await connection.rollback();
+      if (isDuplicateKey(cause)) throw new Error('USER_ALREADY_EXISTS');
+      throw cause;
+    } finally {
+      connection.release();
+    }
   }
 
-  async createAuthCode(input: Omit<AuthCodeRecord, 'id' | 'attemptCount' | 'createdAt'>): Promise<AuthCodeRecord> {
-    const record: AuthCodeRecord = { ...input, id: randomUUID(), attemptCount: 0, createdAt: new Date().toISOString() };
-    await this.pool.execute(
-      `INSERT INTO auth_codes (id, email, code_hash, request_ip, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [record.id, record.email, record.codeHash, record.requestIp, new Date(record.expiresAt), new Date(record.createdAt)],
+  async findPasswordCredential(identifier: string): Promise<PasswordCredential | undefined> {
+    const [rows] = await this.pool.execute<UserRow[]>(
+      `SELECT u.id, u.username, u.email, u.role, u.password_hash, u.must_change_password, u.status,
+              p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
+         FROM users u JOIN profiles p ON p.user_id = u.id
+        WHERE u.email = ? OR u.username = ? LIMIT 1`,
+      [identifier, identifier],
     );
-    return record;
+    const row = rows[0];
+    return row?.password_hash ? { user: mapUser(row), passwordHash: row.password_hash } : undefined;
   }
 
-  async latestAuthCode(email: string): Promise<AuthCodeRecord | undefined> {
-    const [rows] = await this.pool.execute<AuthCodeRow[]>(
-      `SELECT id, email, code_hash, request_ip, expires_at, consumed_at, attempt_count, created_at
-         FROM auth_codes WHERE email = ? AND consumed_at IS NULL
-        ORDER BY created_at DESC LIMIT 1`,
-      [email],
-    );
-    return rows[0] ? mapAuthCode(rows[0]) : undefined;
+  async updatePassword(userId: string, passwordHash: string, mustChangePassword: boolean): Promise<UserAccount | undefined> {
+    await this.pool.execute('UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?', [passwordHash, mustChangePassword, userId]);
+    return this.findUserById(userId);
   }
 
-  async incrementAuthCodeAttempts(codeId: string): Promise<void> {
-    await this.pool.execute('UPDATE auth_codes SET attempt_count = attempt_count + 1 WHERE id = ?', [codeId]);
+  async listUsers(): Promise<UserAccount[]> {
+    const [rows] = await this.pool.execute<UserRow[]>(
+      `SELECT u.id, u.username, u.email, u.role, u.must_change_password, u.status, p.nickname, p.plan_tier, p.exam_date, p.timezone, u.created_at
+         FROM users u JOIN profiles p ON p.user_id = u.id ORDER BY u.created_at ASC`,
+    );
+    return rows.map(mapUser);
   }
 
-  async consumeAuthCode(codeId: string, consumedAt: string): Promise<boolean> {
-    const [result] = await this.pool.execute<ResultSetHeader>(
-      'UPDATE auth_codes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL',
-      [new Date(consumedAt), codeId],
+  async revokeUserSessions(userId: string, revokedAt: string): Promise<void> {
+    await this.pool.execute('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL', [new Date(revokedAt), userId]);
+  }
+
+  async countRateLimitEvents(scope: string, scopeKey: string, since: string): Promise<number> {
+    const [rows] = await this.pool.execute<Array<RowDataPacket & { event_count: number }>>(
+      'SELECT COUNT(*) AS event_count FROM rate_limit_events WHERE scope = ? AND scope_key = ? AND created_at >= ?',
+      [scope, scopeKey, new Date(since)],
     );
-    return result.affectedRows === 1;
+    return Number(rows[0]?.event_count ?? 0);
+  }
+
+  async recordRateLimitEvent(scope: string, scopeKey: string): Promise<void> {
+    await this.pool.execute('INSERT INTO rate_limit_events (scope, scope_key) VALUES (?, ?)', [scope, scopeKey]);
   }
 
   async createAuthSession(input: Omit<AuthSessionRecord, 'id' | 'createdAt' | 'lastSeenAt'>): Promise<AuthSessionRecord> {

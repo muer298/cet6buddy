@@ -1,6 +1,5 @@
 import { questionById, questions } from './data.ts';
 import { AuthError, AuthService, authOptionsFromEnv, type AuthRuntimeOptions } from './auth.ts';
-import { createEmailSender, type EmailSender } from './email.ts';
 import { InMemoryStore, type StudyStore } from './store.ts';
 import { createCosDownloadUrl, createCosUploadGrant, readLocalAsset, saveLocalFile, UploadError, validateUploadMetadata, verifyCosObject } from './upload.ts';
 import type { ContentRecord, GameSessionRecord, GameType, ImportRecord, PublicQuestion, SessionMode, UserAccount, UserRole } from './types.ts';
@@ -103,14 +102,13 @@ function pageOf<T>(items: T[], url: URL): { items: T[]; pagination: { page: numb
 }
 
 export interface AppOptions {
-  emailSender?: EmailSender;
   authOptions?: AuthRuntimeOptions;
   corsOrigin?: string;
 }
 
 export function createApp(store: StudyStore = new InMemoryStore(), options: AppOptions = {}) {
   const corsOrigin = options.corsOrigin ?? process.env.CORS_ORIGIN ?? 'http://127.0.0.1:4173';
-  const auth = new AuthService(store, options.emailSender ?? createEmailSender(), options.authOptions ?? authOptionsFromEnv());
+  const auth = new AuthService(store, options.authOptions ?? authOptionsFromEnv());
 
   async function route(request: Request): Promise<Response> {
     if (request.method === 'OPTIONS') return json(null, 204, undefined, corsOrigin);
@@ -121,20 +119,20 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       return json({ status: 'ok', service: 'cet6-buddy-api', time: new Date().toISOString() }, 200, undefined, corsOrigin);
     }
 
-    if (request.method === 'POST' && path === '/api/auth/email/request') {
+    if (request.method === 'POST' && path === '/api/auth/password/login') {
       const body = await readJson(request);
-      if (!body || typeof body.email !== 'string') return error('INVALID_EMAIL', '请输入邮箱地址。', 422, undefined, corsOrigin);
+      if (!body || typeof body.identifier !== 'string' || typeof body.password !== 'string') return error('INVALID_AUTH_PAYLOAD', '请输入用户名或邮箱和密码。', 422, undefined, corsOrigin);
       const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
       const requestIp = forwarded || request.headers.get('x-real-ip') || 'local';
-      const result = await auth.requestCode(body.email, requestIp);
-      return json({ accepted: true, expires_in: result.expiresIn, ...(result.debugCode ? { debug_code: result.debugCode } : {}) }, 202, undefined, corsOrigin);
+      const result = await auth.login(body.identifier, body.password, requestIp);
+      return json({ user: result.user }, 200, { 'set-cookie': result.cookie }, corsOrigin);
     }
 
-    if (request.method === 'POST' && path === '/api/auth/email/verify') {
+    if (request.method === 'POST' && path === '/api/auth/password/change') {
+      const user = await auth.requireUser(request, true);
       const body = await readJson(request);
-      if (!body || typeof body.email !== 'string' || typeof body.code !== 'string') return error('INVALID_AUTH_PAYLOAD', '邮箱和验证码不能为空。', 422, undefined, corsOrigin);
-      const result = await auth.verifyCode(body.email, body.code);
-      return json({ user: result.user }, 200, { 'set-cookie': result.cookie }, corsOrigin);
+      if (!body || typeof body.current_password !== 'string' || typeof body.new_password !== 'string') return error('INVALID_PASSWORD_PAYLOAD', '当前密码和新密码不能为空。', 422, undefined, corsOrigin);
+      return json({ user: await auth.changePassword(user, body.current_password, body.new_password) }, 200, undefined, corsOrigin);
     }
 
     if (request.method === 'POST' && path === '/api/auth/logout') {
@@ -143,7 +141,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
     }
 
     if (request.method === 'GET' && path === '/api/me') {
-      return json({ user: await auth.requireUser(request) }, 200, undefined, corsOrigin);
+      return json({ user: await auth.requireUser(request, true) }, 200, undefined, corsOrigin);
     }
 
     if (request.method === 'GET' && path === '/api/me/plan') {
@@ -488,6 +486,38 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const updated = await store.updateImport(importStatusMatch[1], status as ImportRecord['status'], user.id, Array.isArray(body?.errors) ? body.errors.map(String) : []);
       if (!updated) return error('IMPORT_NOT_FOUND', '没有找到该导入记录。', 404, undefined, corsOrigin);
       return json({ import: updated }, 200, undefined, corsOrigin);
+    }
+
+    if (request.method === 'GET' && path === '/api/admin/users') {
+      const user = await auth.requireUser(request);
+      requireRole(user, ['admin']);
+      const result = pageOf(await store.listUsers(), url);
+      return json({ users: result.items, pagination: result.pagination }, 200, undefined, corsOrigin);
+    }
+
+    if (request.method === 'POST' && path === '/api/admin/users') {
+      const user = await auth.requireUser(request);
+      requireRole(user, ['admin']);
+      const body = await readJson(request);
+      const role = body?.role === 'editor' || body?.role === 'admin' ? body.role : 'learner';
+      if (!body || typeof body.username !== 'string' || typeof body.email !== 'string' || typeof body.nickname !== 'string') return error('INVALID_USER_PAYLOAD', '用户名、邮箱和昵称不能为空。', 422, undefined, corsOrigin);
+      const created = await auth.createManagedUser({
+        username: body.username,
+        email: body.email,
+        nickname: body.nickname,
+        role,
+        initialPassword: typeof body.initial_password === 'string' && body.initial_password ? body.initial_password : undefined,
+      });
+      return json({ user: created.user, temporary_password: created.temporaryPassword }, 201, undefined, corsOrigin);
+    }
+
+    const resetPasswordMatch = path.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/);
+    if (request.method === 'POST' && resetPasswordMatch) {
+      const user = await auth.requireUser(request);
+      requireRole(user, ['admin']);
+      const body = await readJson(request);
+      const reset = await auth.resetPassword(resetPasswordMatch[1], typeof body?.temporary_password === 'string' && body.temporary_password ? body.temporary_password : undefined);
+      return json({ user: reset.user, temporary_password: reset.temporaryPassword }, 200, undefined, corsOrigin);
     }
 
     if (request.method === 'GET' && path === '/api/admin/content') {

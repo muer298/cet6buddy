@@ -211,7 +211,7 @@ function renderUpload() {
 }
 
 function renderLogin() {
-  return shell(`<div class="auth"><div class="brand"><div class="logo"><i class="logo-mark">B</i>CET6 Buddy</div><h1>把六级学习，变成每天都能完成的小进步。</h1><p>单词、听读、翻译与句式，和朋友一起稳稳积累。</p></div><div class="auth-card"><span class="pill">可以先浏览演示</span><h2 style="margin-top:14px">邮箱验证码登录</h2><p>登录后可保存学习记录、跨设备继续并加入小队。</p><div class="field"><label>邮箱</label><input class="input" value="learner@example.com" /></div><button class="primary" data-route="onboarding">发送验证码</button><button class="secondary" style="width:100%;margin-top:10px" data-route="today">先看看演示</button><p style="text-align:center">继续即表示同意服务条款与隐私说明</p></div></div>`, null, true);
+  return shell(`<div class="auth"><div class="brand"><div class="logo"><i class="logo-mark">B</i>CET6 Buddy</div><h1>把六级学习，变成每天都能完成的小进步。</h1><p>单词、听读、翻译与句式，和朋友一起稳稳积累。</p></div><div class="auth-card"><span class="pill">管理员邀请制试用</span><h2 style="margin-top:14px">账号密码登录</h2><p>登录后可保存学习记录、跨设备继续并加入小队。</p><div class="field"><label>用户名或邮箱</label><input class="input" value="learner@example.com" /></div><div class="field"><label>密码</label><input class="input" type="password" /></div><button class="primary" data-route="onboarding">登录</button><button class="secondary" style="width:100%;margin-top:10px" data-route="today">先看看演示</button><p style="text-align:center">首次登录必须修改管理员发放的初始密码</p></div></div>`, null, true);
 }
 
 function renderOnboarding() {

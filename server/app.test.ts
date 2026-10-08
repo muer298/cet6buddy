@@ -1,27 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createApp } from './app.ts';
-import { MemoryEmailSender } from './email.ts';
-import { InMemoryStore } from './store.ts';
+import { hashPassword } from './auth.ts';
+import { InMemoryStore, type StudyStore } from './store.ts';
+import type { UserRole } from './types.ts';
 
 async function body(response: Response): Promise<Record<string, any>> {
   return await response.json() as Record<string, any>;
 }
 
-async function authenticated(email = 'learner@example.com') {
-  const sender = new MemoryEmailSender();
-  const app = createApp(new InMemoryStore(), {
-    emailSender: sender,
-    authOptions: { codeSecret: 'test-secret-with-enough-entropy', secureCookie: false, exposeCode: false },
-  });
-  const requested = await app.handle(new Request('http://local/api/auth/email/request', {
-    method: 'POST', body: JSON.stringify({ email }),
-  }));
-  assert.equal(requested.status, 202);
-  const code = sender.codes.get(email);
-  assert.ok(code);
-  const verified = await app.handle(new Request('http://local/api/auth/email/verify', {
-    method: 'POST', body: JSON.stringify({ email, code }),
+const TEST_PASSWORD = 'Test-password-2026';
+
+async function authenticated(email = 'learner@example.com', store: StudyStore = new InMemoryStore(), role: UserRole = 'learner') {
+  const username = email.split('@')[0].replace(/[^a-z0-9_.-]/g, '-');
+  if (!await store.findUserByEmail(email)) {
+    await store.createPasswordUser({ username, email, nickname: username, role, passwordHash: await hashPassword(TEST_PASSWORD), mustChangePassword: false });
+  }
+  const app = createApp(store, { authOptions: { secureCookie: false } });
+  const verified = await app.handle(new Request('http://local/api/auth/password/login', {
+    method: 'POST', body: JSON.stringify({ identifier: email, password: TEST_PASSWORD }),
   }));
   assert.equal(verified.status, 200);
   const cookie = verified.headers.get('set-cookie')?.split(';')[0];
@@ -30,7 +27,7 @@ async function authenticated(email = 'learner@example.com') {
     ...init,
     headers: { cookie, ...init.headers },
   }));
-  return { ...app, cookie, request, sender };
+  return { ...app, cookie, request };
 }
 
 test('health and plan expose stable server state', async () => {
@@ -111,29 +108,65 @@ test('finishing a complete session awards daily points only once', async () => {
   assert.equal(repeated.reward.awarded, false);
 });
 
-test('email login creates isolated users and supports logout', async () => {
+test('password login keeps users isolated and supports logout', async () => {
   const first = await authenticated('first@example.com');
   const me = await first.request('http://local/api/me');
   assert.equal(me.status, 200);
   assert.equal((await body(me)).user.email, 'first@example.com');
 
   const created = await body(await first.request('http://local/api/study/sessions', { method: 'POST', body: '{}' }));
-  const secondSender = new MemoryEmailSender();
-  const secondApp = createApp(first.store, {
-    emailSender: secondSender,
-    authOptions: { codeSecret: 'test-secret-with-enough-entropy', secureCookie: false, exposeCode: false },
-  });
-  await secondApp.handle(new Request('http://local/api/auth/email/request', { method: 'POST', body: JSON.stringify({ email: 'second@example.com' }) }));
-  const secondCode = secondSender.codes.get('second@example.com');
-  const secondLogin = await secondApp.handle(new Request('http://local/api/auth/email/verify', { method: 'POST', body: JSON.stringify({ email: 'second@example.com', code: secondCode }) }));
-  const secondCookie = secondLogin.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const forbidden = await secondApp.handle(new Request(`http://local/api/sessions/${created.session.id}`, { headers: { cookie: secondCookie } }));
+  const second = await authenticated('second@example.com', first.store);
+  const forbidden = await second.request(`http://local/api/sessions/${created.session.id}`);
   assert.equal(forbidden.status, 404);
 
   const logout = await first.request('http://local/api/auth/logout', { method: 'POST' });
   assert.equal(logout.status, 200);
   const afterLogout = await first.request('http://local/api/me');
   assert.equal(afterLogout.status, 401);
+});
+
+test('admin creates users, first login requires a password change, and reset revokes sessions', async () => {
+  const store = new InMemoryStore();
+  const admin = await authenticated('admin-auth@example.com', store, 'admin');
+  const createdResponse = await admin.request('http://local/api/admin/users', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'pilot-user', email: 'pilot@example.com', nickname: '试用用户', role: 'learner', initial_password: 'Initial-pass-2026' }),
+  });
+  assert.equal(createdResponse.status, 201);
+  const created = await body(createdResponse);
+  assert.equal(created.user.mustChangePassword, true);
+
+  const app = createApp(store, { authOptions: { secureCookie: false } });
+  const login = await app.handle(new Request('http://local/api/auth/password/login', {
+    method: 'POST', body: JSON.stringify({ identifier: 'pilot-user', password: 'Initial-pass-2026' }),
+  }));
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
+  const request = (url: string, init: RequestInit = {}) => app.handle(new Request(url, { ...init, headers: { cookie, ...init.headers } }));
+  assert.equal((await request('http://local/api/me')).status, 200);
+  const blocked = await request('http://local/api/me/plan');
+  assert.equal(blocked.status, 403);
+  assert.equal((await body(blocked)).error.code, 'PASSWORD_CHANGE_REQUIRED');
+
+  const changed = await request('http://local/api/auth/password/change', {
+    method: 'POST', body: JSON.stringify({ current_password: 'Initial-pass-2026', new_password: 'Personal-pass-2026' }),
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await body(changed)).user.mustChangePassword, false);
+  assert.equal((await request('http://local/api/me/plan')).status, 200);
+
+  const reset = await body(await admin.request(`http://local/api/admin/users/${created.user.id}/reset-password`, { method: 'POST', body: '{}' }));
+  assert.ok(reset.temporary_password);
+  assert.equal((await request('http://local/api/me')).status, 401);
+  const oldLogin = await app.handle(new Request('http://local/api/auth/password/login', {
+    method: 'POST', body: JSON.stringify({ identifier: 'pilot@example.com', password: 'Personal-pass-2026' }),
+  }));
+  assert.equal(oldLogin.status, 401);
+  const resetLogin = await app.handle(new Request('http://local/api/auth/password/login', {
+    method: 'POST', body: JSON.stringify({ identifier: 'pilot@example.com', password: reset.temporary_password }),
+  }));
+  assert.equal(resetLogin.status, 200);
+  assert.equal((await body(resetLogin)).user.mustChangePassword, true);
 });
 
 test('learning loop exposes plan, reviews, collections, corrections and open output', async () => {
@@ -197,13 +230,8 @@ test('team invitations and asynchronous challenge allow one ranked participation
   const owner = await authenticated('owner@example.com');
   const createdTeam = await body(await owner.request('http://local/api/teams', { method: 'POST', body: JSON.stringify({ name: '六级测试小队' }) }));
 
-  const memberSender = new MemoryEmailSender();
-  const memberApp = createApp(owner.store, { emailSender: memberSender, authOptions: { codeSecret: 'test-secret-with-enough-entropy', secureCookie: false, exposeCode: false } });
-  await memberApp.handle(new Request('http://local/api/auth/email/request', { method: 'POST', body: JSON.stringify({ email: 'member@example.com' }) }));
-  const code = memberSender.codes.get('member@example.com');
-  const login = await memberApp.handle(new Request('http://local/api/auth/email/verify', { method: 'POST', body: JSON.stringify({ email: 'member@example.com', code }) }));
-  const cookie = login.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const memberRequest = (url: string, init: RequestInit = {}) => memberApp.handle(new Request(url, { ...init, headers: { cookie, ...init.headers } }));
+  const member = await authenticated('member@example.com', owner.store);
+  const memberRequest = member.request;
   const joined = await memberRequest('http://local/api/teams/join', { method: 'POST', body: JSON.stringify({ invite_code: createdTeam.team.inviteCode }) });
   assert.equal(joined.status, 200);
   const teamOverview = await body(await owner.request('http://local/api/teams/me'));
@@ -242,34 +270,21 @@ test('private uploads validate signatures and stay isolated by owner', async () 
   assert.equal(downloaded.status, 200);
   assert.equal(downloaded.headers.get('cache-control'), 'private, no-store');
 
-  const otherSender = new MemoryEmailSender();
-  const otherApp = createApp(owner.store, { emailSender: otherSender, authOptions: { codeSecret: 'test-secret-with-enough-entropy', secureCookie: false, exposeCode: false } });
-  await otherApp.handle(new Request('http://local/api/auth/email/request', { method: 'POST', body: JSON.stringify({ email: 'upload-other@example.com' }) }));
-  const otherLogin = await otherApp.handle(new Request('http://local/api/auth/email/verify', { method: 'POST', body: JSON.stringify({ email: 'upload-other@example.com', code: otherSender.codes.get('upload-other@example.com') }) }));
-  const otherCookie = otherLogin.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const otherImports = await body(await otherApp.handle(new Request('http://local/api/imports', { headers: { cookie: otherCookie } })));
+  const other = await authenticated('upload-other@example.com', owner.store);
+  const otherImports = await body(await other.request('http://local/api/imports'));
   assert.equal(otherImports.imports.length, 0);
-  const forbiddenDownload = await otherApp.handle(new Request(`http://local/api/assets/${uploadedBody.asset.id}/download`, { headers: { cookie: otherCookie } }));
+  const forbiddenDownload = await other.request(`http://local/api/assets/${uploadedBody.asset.id}/download`);
   assert.equal(forbiddenDownload.status, 404);
 });
 
 test('admin content publishing enforces role and required fields', async () => {
-  const sender = new MemoryEmailSender();
-  const app = createApp(new InMemoryStore(), {
-    emailSender: sender,
-    authOptions: { codeSecret: 'test-secret-with-enough-entropy', secureCookie: false, exposeCode: false, adminEmails: ['admin@example.com'] },
-  });
-  async function login(email: string) {
-    await app.handle(new Request('http://local/api/auth/email/request', { method: 'POST', body: JSON.stringify({ email }) }));
-    const response = await app.handle(new Request('http://local/api/auth/email/verify', { method: 'POST', body: JSON.stringify({ email, code: sender.codes.get(email) }) }));
-    return response.headers.get('set-cookie')?.split(';')[0] ?? '';
-  }
-  const learnerCookie = await login('ordinary@example.com');
-  const denied = await app.handle(new Request('http://local/api/admin/content', { headers: { cookie: learnerCookie } }));
+  const store = new InMemoryStore();
+  const learner = await authenticated('ordinary@example.com', store);
+  const denied = await learner.request('http://local/api/admin/content');
   assert.equal(denied.status, 403);
 
-  const adminCookie = await login('admin@example.com');
-  const adminRequest = (url: string, init: RequestInit = {}) => app.handle(new Request(url, { ...init, headers: { cookie: adminCookie, ...init.headers } }));
+  const admin = await authenticated('admin@example.com', store, 'admin');
+  const adminRequest = admin.request;
   const incomplete = await body(await adminRequest('http://local/api/admin/content', { method: 'POST', body: JSON.stringify({ kind: 'word', payload: { word: 'incomplete' } }) }));
   const rejected = await adminRequest(`http://local/api/admin/content/${incomplete.content.id}/publish`, { method: 'POST', body: '{}' });
   assert.equal(rejected.status, 422);

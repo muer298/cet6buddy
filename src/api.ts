@@ -22,12 +22,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload;
 }
 
-export async function requestLoginCode(email: string): Promise<{ expires_in: number; debug_code?: string }> {
-  return request('/api/auth/email/request', { method: 'POST', body: JSON.stringify({ email }) });
+export async function passwordLogin(identifier: string, password: string): Promise<{ user: CurrentUser }> {
+  return request('/api/auth/password/login', { method: 'POST', body: JSON.stringify({ identifier, password }) });
 }
 
-export async function verifyLoginCode(email: string, code: string): Promise<{ user: CurrentUser }> {
-  return request('/api/auth/email/verify', { method: 'POST', body: JSON.stringify({ email, code }) });
+export async function changePassword(currentPassword: string, newPassword: string): Promise<{ user: CurrentUser }> {
+  return request('/api/auth/password/change', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) });
 }
 
 export async function getCurrentUser(): Promise<CurrentUser> {
@@ -265,4 +265,22 @@ export function createManagedContent(kind: string, payload: Record<string, unkno
 
 export function setManagedContentStatus(contentId: string, action: 'publish' | 'withdraw'): Promise<{ content: ManagedContent }> {
   return request(`/api/admin/content/${contentId}/${action}`, { method: 'POST', body: '{}' });
+}
+
+export interface ManagedUser extends CurrentUser {
+  createdAt: string;
+}
+
+export function getManagedUsers(): Promise<{ users: ManagedUser[] }> {
+  return request('/api/admin/users');
+}
+
+export function createManagedUser(input: { username: string; email: string; nickname: string; role: CurrentUser['role']; initialPassword?: string }): Promise<{ user: ManagedUser; temporary_password: string }> {
+  return request('/api/admin/users', { method: 'POST', body: JSON.stringify({
+    username: input.username, email: input.email, nickname: input.nickname, role: input.role, initial_password: input.initialPassword,
+  }) });
+}
+
+export function resetManagedUserPassword(userId: string, temporaryPassword?: string): Promise<{ user: ManagedUser; temporary_password: string }> {
+  return request(`/api/admin/users/${userId}/reset-password`, { method: 'POST', body: JSON.stringify({ temporary_password: temporaryPassword }) });
 }

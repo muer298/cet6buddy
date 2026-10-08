@@ -11,6 +11,7 @@
     "start:api": "node --env-file-if-exists=.env dist/server/index.js",
     "db:check": "node --env-file-if-exists=.env server/check-db.ts",
     "db:migrate": "node --env-file-if-exists=.env server/migrate.ts",
+    "admin:bootstrap": "node --env-file-if-exists=.env server/bootstrap-admin.ts",
     "content:seed": "node --env-file-if-exists=.env server/seed-pilot-content.ts",
     "test:server": "node --test server/app.test.ts",
     "typecheck": "tsc -b --pretty false"
@@ -21,8 +22,7 @@
     "mysql2": "3.24.5",
     "qcloud-cos-sts": "3.1.3",
     "react": "19.1.1",
-    "react-dom": "19.1.1",
-    "tencentcloud-sdk-nodejs-ses": "4.1.271"
+    "react-dom": "19.1.1"
   },
   "overrides": {
     "fast-xml-parser": "5.7.0",

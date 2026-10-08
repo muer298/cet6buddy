@@ -1,11 +1,15 @@
-import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
-import type { EmailSender } from './email.ts';
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import type { StudyStore } from './store.ts';
-import type { UserAccount } from './types.ts';
+import type { UserAccount, UserRole } from './types.ts';
 
 const COOKIE_NAME = 'cet6_session';
-const CODE_TTL_MS = 10 * 60 * 1000;
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const SCRYPT_N = 16_384;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_KEY_LENGTH = 64;
+const FAKE_PASSWORD_HASH = 'scrypt$16384$8$1$0af7f4430e0c8f6e76fa40ea3577be15$0bfb1cba86c328135579e385cd8ce7d61c29aff423be41b5ff5b35c920cfacdd9de6e2d257df7370059bf377e510f3e34ff37dfd7c476d418a7ce9c37cdd284f';
 
 export class AuthError extends Error {
   readonly code: string;
@@ -18,25 +22,12 @@ export class AuthError extends Error {
   }
 }
 
-function normalizeEmail(value: string): string {
+function normalizeIdentifier(value: string): string {
   return value.trim().toLowerCase();
-}
-
-function validEmail(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 255;
 }
 
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function codeDigest(email: string, code: string, secret: string): string {
-  return createHmac('sha256', secret).update(`${email}:${code}`).digest('hex');
-}
-
-function equalHex(left: string, right: string): boolean {
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'));
 }
 
 function cookieValue(request: Request, name: string): string | undefined {
@@ -48,77 +39,122 @@ function cookieValue(request: Request, name: string): string | undefined {
   return undefined;
 }
 
+export function validEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && email.length <= 255;
+}
+
+export function validUsername(username: string): boolean {
+  return /^[a-z0-9][a-z0-9_.-]{2,31}$/.test(username);
+}
+
+export function validatePassword(password: string): void {
+  if (password.length < 10 || password.length > 128) throw new AuthError('WEAK_PASSWORD', '密码长度必须为 10–128 个字符。', 422);
+  if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) throw new AuthError('WEAK_PASSWORD', '密码必须同时包含字母和数字。', 422);
+}
+
+export async function hashPassword(password: string): Promise<string> {
+  validatePassword(password);
+  const salt = randomBytes(16);
+  const derived = await derivePassword(password, salt, SCRYPT_KEY_LENGTH, SCRYPT_N, SCRYPT_R, SCRYPT_P);
+  return `scrypt$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt.toString('hex')}$${derived.toString('hex')}`;
+}
+
+export async function verifyPassword(password: string, encoded: string): Promise<boolean> {
+  const [algorithm, rawN, rawR, rawP, saltHex, hashHex] = encoded.split('$');
+  if (algorithm !== 'scrypt' || !rawN || !rawR || !rawP || !saltHex || !hashHex) return false;
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual = await derivePassword(password, Buffer.from(saltHex, 'hex'), expected.length, Number(rawN), Number(rawR), Number(rawP));
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+export function generateTemporaryPassword(): string {
+  return `C6-${randomBytes(12).toString('base64url')}9a`;
+}
+
 export interface AuthRuntimeOptions {
-  codeSecret: string;
   secureCookie: boolean;
-  exposeCode: boolean;
-  adminEmails?: string[];
+}
+
+function derivePassword(password: string, salt: Buffer, length: number, N: number, r: number, p: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCallback(password, salt, length, { N, r, p }, (error, derivedKey) => error ? reject(error) : resolve(derivedKey));
+  });
 }
 
 export function authOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): AuthRuntimeOptions {
   const production = env.NODE_ENV === 'production';
-  const codeSecret = env.AUTH_CODE_SECRET ?? (production ? '' : 'cet6-buddy-development-only-secret');
-  if (!codeSecret) throw new Error('生产环境必须配置 AUTH_CODE_SECRET。');
-  return {
-    codeSecret,
-    secureCookie: production || env.COOKIE_SECURE === 'true',
-    exposeCode: !production && env.AUTH_EXPOSE_CODE === 'true',
-    adminEmails: (env.ADMIN_EMAILS ?? '').split(',').map(email => email.trim().toLowerCase()).filter(Boolean),
-  };
+  return { secureCookie: production || env.COOKIE_SECURE === 'true' };
 }
 
 export class AuthService {
   private readonly store: StudyStore;
-  private readonly sender: EmailSender;
   private readonly options: AuthRuntimeOptions;
 
   constructor(
     store: StudyStore,
-    sender: EmailSender,
     options: AuthRuntimeOptions,
   ) {
     this.store = store;
-    this.sender = sender;
     this.options = options;
   }
 
-  async requestCode(rawEmail: string, requestIp: string): Promise<{ expiresIn: number; debugCode?: string }> {
-    const email = normalizeEmail(rawEmail);
-    if (!validEmail(email)) throw new AuthError('INVALID_EMAIL', '请输入有效的邮箱地址。', 422);
-    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const recent = await this.store.countRecentAuthCodes(email, requestIp, since);
-    if (recent.email >= 5 || recent.ip >= 20) throw new AuthError('AUTH_RATE_LIMITED', '验证码请求过于频繁，请稍后再试。', 429);
+  async login(rawIdentifier: string, password: string, requestIp: string): Promise<{ user: UserAccount; cookie: string }> {
+    const identifier = normalizeIdentifier(rawIdentifier);
+    if (!identifier || identifier.length > 255 || !password) throw new AuthError('INVALID_AUTH_PAYLOAD', '请输入用户名或邮箱和密码。', 422);
+    const since = new Date(Date.now() - LOGIN_WINDOW_MS).toISOString();
+    const [identifierFailures, ipFailures] = await Promise.all([
+      this.store.countRateLimitEvents('password-login', identifier, since),
+      this.store.countRateLimitEvents('password-login-ip', requestIp, since),
+    ]);
+    if (identifierFailures >= 5 || ipFailures >= 20) throw new AuthError('AUTH_RATE_LIMITED', '登录失败次数过多，请 15 分钟后再试。', 429);
 
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
-    await this.store.createAuthCode({
-      email,
-      codeHash: codeDigest(email, code, this.options.codeSecret),
-      requestIp,
-      expiresAt: new Date(Date.now() + CODE_TTL_MS).toISOString(),
-    });
-    await this.sender.sendLoginCode(email, code);
-    return { expiresIn: CODE_TTL_MS / 1000, ...(this.options.exposeCode ? { debugCode: code } : {}) };
+    const credential = await this.store.findPasswordCredential(identifier);
+    const valid = await verifyPassword(password, credential?.passwordHash ?? FAKE_PASSWORD_HASH);
+    if (!credential || !valid) {
+      await Promise.all([
+        this.store.recordRateLimitEvent('password-login', identifier),
+        this.store.recordRateLimitEvent('password-login-ip', requestIp),
+      ]);
+      throw new AuthError('INVALID_CREDENTIALS', '用户名、邮箱或密码不正确。', 401);
+    }
+    if (credential.user.status !== 'active') throw new AuthError('ACCOUNT_DISABLED', '账号已停用，请联系管理员。', 403);
+    return { user: credential.user, cookie: await this.startSession(credential.user.id) };
   }
 
-  async verifyCode(rawEmail: string, code: string): Promise<{ user: UserAccount; token: string; cookie: string }> {
-    const email = normalizeEmail(rawEmail);
-    const record = await this.store.latestAuthCode(email);
-    if (!record || record.expiresAt <= new Date().toISOString()) throw new AuthError('AUTH_CODE_EXPIRED', '验证码已过期，请重新获取。', 401);
-    if (record.attemptCount >= 5) throw new AuthError('AUTH_CODE_LOCKED', '验证码尝试次数过多，请重新获取。', 429);
-    const submitted = codeDigest(email, code.trim(), this.options.codeSecret);
-    if (!equalHex(record.codeHash, submitted)) {
-      await this.store.incrementAuthCodeAttempts(record.id);
-      throw new AuthError('AUTH_CODE_INVALID', '验证码不正确。', 401);
-    }
-    const consumed = await this.store.consumeAuthCode(record.id, new Date().toISOString());
-    if (!consumed) throw new AuthError('AUTH_CODE_USED', '验证码已经使用，请重新获取。', 409);
+  async changePassword(user: UserAccount, currentPassword: string, newPassword: string): Promise<UserAccount> {
+    validatePassword(newPassword);
+    if (currentPassword === newPassword) throw new AuthError('PASSWORD_UNCHANGED', '新密码不能与当前密码相同。', 422);
+    const credential = await this.store.findPasswordCredential(user.email);
+    if (!credential || !await verifyPassword(currentPassword, credential.passwordHash)) throw new AuthError('CURRENT_PASSWORD_INVALID', '当前密码不正确。', 401);
+    const updated = await this.store.updatePassword(user.id, await hashPassword(newPassword), false);
+    if (!updated) throw new AuthError('USER_NOT_FOUND', '账号不存在。', 404);
+    return updated;
+  }
 
-    const nickname = email.split('@')[0].slice(0, 20) || '六级学习者';
-    let user = await this.store.findUserByEmail(email) ?? await this.store.createUser(email, nickname);
-    if (this.options.adminEmails?.includes(email) && user.role !== 'admin') user = await this.store.setUserRole(user.id, 'admin') ?? user;
-    const token = randomBytes(32).toString('base64url');
-    await this.store.createAuthSession({ userId: user.id, tokenHash: digest(token), expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString() });
-    return { user, token, cookie: this.sessionCookie(token) };
+  async createManagedUser(input: { username: string; email: string; nickname: string; role: UserRole; initialPassword?: string }): Promise<{ user: UserAccount; temporaryPassword: string }> {
+    const username = normalizeIdentifier(input.username);
+    const email = normalizeIdentifier(input.email);
+    const nickname = input.nickname.trim();
+    if (!validUsername(username)) throw new AuthError('INVALID_USERNAME', '用户名需为 3–32 位小写字母、数字、点、短横线或下划线。', 422);
+    if (!validEmail(email)) throw new AuthError('INVALID_EMAIL', '请输入有效的邮箱地址。', 422);
+    if (!nickname || nickname.length > 80) throw new AuthError('INVALID_NICKNAME', '昵称不能为空且不能超过 80 个字符。', 422);
+    const temporaryPassword = input.initialPassword || generateTemporaryPassword();
+    const passwordHash = await hashPassword(temporaryPassword);
+    try {
+      const user = await this.store.createPasswordUser({ username, email, nickname, role: input.role, passwordHash, mustChangePassword: true });
+      return { user, temporaryPassword };
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === 'USER_ALREADY_EXISTS') throw new AuthError('USER_ALREADY_EXISTS', '用户名或邮箱已经存在。', 409);
+      throw cause;
+    }
+  }
+
+  async resetPassword(userId: string, requestedPassword?: string): Promise<{ user: UserAccount; temporaryPassword: string }> {
+    const temporaryPassword = requestedPassword || generateTemporaryPassword();
+    const updated = await this.store.updatePassword(userId, await hashPassword(temporaryPassword), true);
+    if (!updated) throw new AuthError('USER_NOT_FOUND', '账号不存在。', 404);
+    await this.store.revokeUserSessions(userId, new Date().toISOString());
+    return { user: updated, temporaryPassword };
   }
 
   async currentUser(request: Request): Promise<UserAccount | undefined> {
@@ -127,14 +163,15 @@ export class AuthService {
     const session = await this.store.findAuthSession(digest(token));
     if (!session || session.expiresAt <= new Date().toISOString()) return undefined;
     const user = await this.store.findUserById(session.userId);
-    if (!user) return undefined;
+    if (!user || user.status !== 'active') return undefined;
     await this.store.touchAuthSession(session.id, new Date().toISOString());
     return user;
   }
 
-  async requireUser(request: Request): Promise<UserAccount> {
+  async requireUser(request: Request, allowPasswordChange = false): Promise<UserAccount> {
     const user = await this.currentUser(request);
     if (!user) throw new AuthError('AUTH_REQUIRED', '请先登录后继续。', 401);
+    if (user.mustChangePassword && !allowPasswordChange) throw new AuthError('PASSWORD_CHANGE_REQUIRED', '首次登录必须修改初始密码。', 403);
     return user;
   }
 
@@ -144,7 +181,9 @@ export class AuthService {
     return this.clearCookie();
   }
 
-  private sessionCookie(token: string): string {
+  private async startSession(userId: string): Promise<string> {
+    const token = randomBytes(32).toString('base64url');
+    await this.store.createAuthSession({ userId, tokenHash: digest(token), expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString() });
     return `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}${this.options.secureCookie ? '; Secure' : ''}`;
   }
 

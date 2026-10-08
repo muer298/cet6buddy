@@ -1,8 +1,16 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createApp } from './app.ts';
+import { hashPassword } from './auth.ts';
 import { createStoreFromEnv } from './store-factory.ts';
 
 const runtime = await createStoreFromEnv();
+if (runtime.driver === 'memory' && process.env.NODE_ENV !== 'production' && process.env.DEV_BOOTSTRAP_PASSWORD) {
+  const email = (process.env.DEV_BOOTSTRAP_EMAIL ?? 'visual-admin@cet6.local').toLowerCase();
+  const username = (process.env.DEV_BOOTSTRAP_USERNAME ?? 'visual-admin').toLowerCase();
+  if (!await runtime.store.findUserByEmail(email)) {
+    await runtime.store.createPasswordUser({ username, email, nickname: '本地管理员', role: 'admin', passwordHash: await hashPassword(process.env.DEV_BOOTSTRAP_PASSWORD), mustChangePassword: false });
+  }
+}
 if (process.argv.includes('--check-config')) {
   console.log(`CET6 Buddy configuration is valid; storage=${runtime.driver}`);
   await runtime.store.close?.();
