@@ -40,6 +40,10 @@ export interface ServerQuestion {
   options: string[];
   correctIndex: number;
   explanation: string;
+  contentItemId?: string;
+  source?: string;
+  passage?: string;
+  audioUrl?: string;
 }
 
 export interface PublicQuestion extends Omit<ServerQuestion, 'correctIndex' | 'explanation'> {}
@@ -51,6 +55,7 @@ export interface StudySession {
   mode: SessionMode;
   status: SessionStatus;
   questionIds: string[];
+  questionVersions?: Record<string, number>;
   createdAt: string;
   finishedAt?: string;
 }
@@ -127,6 +132,7 @@ export interface GameSessionRecord {
   mode: 'practice' | 'challenge';
   status: 'active' | 'finished';
   questionIds: string[];
+  questionVersions?: Record<string, number>;
   rules: { questionCount: number; secondsPerQuestion: number | null; ruleVersion: number };
   score: number;
   correctCount: number;
@@ -167,6 +173,7 @@ export interface ChallengeRecord {
   gameType: GameType;
   title: string;
   questionIds: string[];
+  questionVersions?: Record<string, number>;
   rules: GameSessionRecord['rules'];
   status: 'open' | 'closed';
   deadlineAt: string;

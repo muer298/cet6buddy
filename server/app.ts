@@ -1,8 +1,8 @@
-import { questionById, questions } from './data.ts';
+import { contentErrors, freezeQuestions, publicQuestion, publishedQuestions, questionsFromContent, sampleQuestions, sessionQuestions } from './question-bank.ts';
 import { AuthError, AuthService, authOptionsFromEnv, type AuthRuntimeOptions } from './auth.ts';
 import { InMemoryStore, type StudyStore } from './store.ts';
 import { createCosDownloadUrl, createCosUploadGrant, readLocalAsset, saveLocalFile, UploadError, validateUploadMetadata, verifyCosObject } from './upload.ts';
-import type { ContentRecord, GameSessionRecord, GameType, ImportRecord, PublicQuestion, SessionMode, UserAccount, UserRole } from './types.ts';
+import type { ContentRecord, GameSessionRecord, GameType, ImportRecord, SessionMode, UserAccount, UserRole } from './types.ts';
 
 function json(data: unknown, status = 200, extraHeaders?: HeadersInit, corsOrigin = 'http://127.0.0.1:4173'): Response {
   return new Response(status === 204 ? null : JSON.stringify(data), {
@@ -41,13 +41,6 @@ function nextShanghaiDate(): string {
   return shanghaiDate(new Date(Date.now() + 24 * 60 * 60 * 1000));
 }
 
-function publicQuestion(questionId: string): PublicQuestion | undefined {
-  const question = questionById.get(questionId);
-  if (!question) return undefined;
-  const { correctIndex: _correctIndex, explanation: _explanation, ...safe } = question;
-  return safe;
-}
-
 function gameRules(gameType: GameType, requestedSeconds?: number): GameSessionRecord['rules'] {
   if (gameType === 'root-chain') return { questionCount: 5, secondsPerQuestion: null, ruleVersion: 1 };
   if (gameType === 'flash') return { questionCount: 10, secondsPerQuestion: [12, 20].includes(requestedSeconds ?? 12) ? requestedSeconds ?? 12 : null, ruleVersion: 1 };
@@ -69,30 +62,6 @@ function inviteCode(): string {
 
 function requireRole(user: UserAccount, roles: UserRole[]): void {
   if (!roles.includes(user.role)) throw new AuthError('FORBIDDEN', '当前账号没有执行此操作的权限。', 403);
-}
-
-function contentErrors(kind: string, payload: Record<string, unknown>): string[] {
-  const errors: string[] = [];
-  const text = (key: string) => typeof payload[key] === 'string' && String(payload[key]).trim().length > 0;
-  const list = (key: string) => Array.isArray(payload[key]) && (payload[key] as unknown[]).length > 0;
-  if (kind === 'word') {
-    if (!text('word')) errors.push('缺少单词');
-    if (!text('meaning')) errors.push('缺少释义');
-  } else if (kind === 'listening') {
-    if (!text('title')) errors.push('缺少标题');
-    if (!text('asset_id')) errors.push('缺少音频资源');
-    if (!list('questions')) errors.push('缺少题目');
-  } else if (kind === 'reading') {
-    if (!text('title')) errors.push('缺少标题');
-    if (!text('passage')) errors.push('缺少文章');
-    if (!list('questions')) errors.push('缺少题目');
-  } else if (kind === 'translation' || kind === 'writing') {
-    if (!text('prompt')) errors.push('缺少题干');
-    if (!list('references')) errors.push('缺少参考表达');
-  } else {
-    errors.push('不支持的内容类型');
-  }
-  return errors;
 }
 
 function pageOf<T>(items: T[], url: URL): { items: T[]; pagination: { page: number; page_size: number; total: number; pages: number } } {
@@ -198,7 +167,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
     if (request.method === 'GET' && path === '/api/me/reviews') {
       const user = await auth.requireUser(request);
       const dueBefore = url.searchParams.get('due_before') ?? new Date().toISOString();
-      const result = pageOf(await store.listReviews(user.id, dueBefore), url);
+      const result = pageOf((await store.listReviews(user.id, dueBefore)).map(({ payload, ...review }) => ({ ...review, payload: payload ? { word: payload.word, title: payload.title } : undefined })), url);
       return json({ reviews: result.items, pagination: result.pagination }, 200, undefined, corsOrigin);
     }
 
@@ -241,8 +210,10 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
     if (request.method === 'POST' && path === '/api/spelling-attempts') {
       const user = await auth.requireUser(request);
       const body = await readJson(request);
-      const question = typeof body?.content_item_id === 'string' ? questionById.get(body.content_item_id) : undefined;
-      if (!question || !question.id.startsWith('w-') || body?.content_version !== question.version || typeof body.answer_text !== 'string' || typeof body.idempotency_key !== 'string') return error('INVALID_SPELLING_ATTEMPT', '拼写作答信息无效。', 422, undefined, corsOrigin);
+      const study = typeof body?.session_id === 'string' ? await store.getSession(body.session_id) : undefined;
+      const pool = study?.userId === user.id ? await sessionQuestions(store, study) : await publishedQuestions(store, 'word', user.id);
+      const question = pool.find(q => q.id === body?.content_item_id && !q.id.includes(':'));
+      if (!question || body?.content_version !== question.version || typeof body.answer_text !== 'string' || typeof body.idempotency_key !== 'string') return error('INVALID_SPELLING_ATTEMPT', '拼写作答信息无效或题目已下架。', 422, undefined, corsOrigin);
       const answer = body.answer_text.trim().toLowerCase();
       const correct = answer === question.word.toLowerCase();
       const saved = await store.saveSpellingAttempt({ userId: user.id, contentItemId: question.id, contentVersion: question.version, answerText: body.answer_text.trim(), correct, idempotencyKey: body.idempotency_key });
@@ -268,10 +239,11 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const gameType = body?.game_type;
       if (gameType !== 'root-chain' && gameType !== 'flash' && gameType !== 'streak') return error('INVALID_GAME_TYPE', '游戏类型无效。', 422, undefined, corsOrigin);
       const rules = gameRules(gameType, typeof body?.seconds_per_question === 'number' ? body.seconds_per_question : undefined);
+      const questions = await publishedQuestions(store, 'word', user.id);
       if (questions.length < rules.questionCount) return error('INSUFFICIENT_QUESTION_POOL', '当前题源不足，无法开始本局。', 409, { required: rules.questionCount, available: questions.length }, corsOrigin);
-      const questionIds = questions.slice(0, rules.questionCount).map(question => question.id);
-      const session = await store.createGameSession({ userId: user.id, gameType, mode: 'practice', questionIds, rules });
-      return json({ session: { ...session, questions: questionIds.map(publicQuestion) } }, 201, undefined, corsOrigin);
+      const selected = sampleQuestions(questions, rules.questionCount);
+      const session = await store.createGameSession({ userId: user.id, gameType, mode: 'practice', ...freezeQuestions(selected), rules });
+      return json({ session: { ...session, questions: selected.map(publicQuestion) } }, 201, undefined, corsOrigin);
     }
 
     const gameSessionMatch = path.match(/^\/api\/game-sessions\/([^/]+)$/);
@@ -279,7 +251,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const user = await auth.requireUser(request);
       const session = await store.getGameSession(gameSessionMatch[1]);
       if (!session || session.userId !== user.id) return error('GAME_SESSION_NOT_FOUND', '没有找到该游戏会话。', 404, undefined, corsOrigin);
-      return json({ session: { ...session, questions: session.questionIds.map(publicQuestion) }, attempts: await store.gameAttempts(session.id) }, 200, undefined, corsOrigin);
+      return json({ session: { ...session, questions: (await sessionQuestions(store, session)).map(publicQuestion) }, attempts: await store.gameAttempts(session.id) }, 200, undefined, corsOrigin);
     }
 
     const gameAnswerMatch = path.match(/^\/api\/game-sessions\/([^/]+)\/answers$/);
@@ -293,7 +265,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const expectedQuestionId = session.questionIds[attempts.length];
       const questionId = typeof body?.question_id === 'string' ? body.question_id : '';
       if (!expectedQuestionId || questionId !== expectedQuestionId) return error('GAME_QUESTION_ORDER', '请按本局冻结顺序作答。', 409, { expected_question_id: expectedQuestionId }, corsOrigin);
-      const question = questionById.get(questionId);
+      const question = (await sessionQuestions(store, session)).find(q => q.id === questionId);
       const questionVersion = typeof body?.question_version === 'number' ? body.question_version : -1;
       if (!question || question.version !== questionVersion) return error('QUESTION_VERSION_MISMATCH', '题目版本已经变化。', 409, undefined, corsOrigin);
       const idempotencyKey = typeof body?.idempotency_key === 'string' ? body.idempotency_key : request.headers.get('idempotency-key') ?? '';
@@ -377,7 +349,9 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (gameType !== 'root-chain' && gameType !== 'flash' && gameType !== 'streak') return error('INVALID_GAME_TYPE', '挑战玩法无效。', 422, undefined, corsOrigin);
       const rules = gameRules(gameType, typeof body?.seconds_per_question === 'number' ? body.seconds_per_question : undefined);
       const deadlineAt = typeof body?.deadline_at === 'string' && new Date(body.deadline_at).getTime() > Date.now() ? body.deadline_at : new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-      const challenge = await store.createChallenge({ teamId: overview.team.id, creatorId: user.id, gameType, title: typeof body?.title === 'string' ? body.title.slice(0, 120) : '小队同题挑战', rules, questionIds: questions.slice(0, rules.questionCount).map(question => question.id), deadlineAt });
+      const questions = await publishedQuestions(store, 'word');
+      if (questions.length < rules.questionCount) return error('INSUFFICIENT_QUESTION_POOL', '可共享的已发布题目不足。', 409, { required: rules.questionCount, available: questions.length }, corsOrigin);
+      const challenge = await store.createChallenge({ teamId: overview.team.id, creatorId: user.id, gameType, title: typeof body?.title === 'string' ? body.title.slice(0, 120) : '小队同题挑战', rules, ...freezeQuestions(sampleQuestions(questions, rules.questionCount)), deadlineAt });
       return json({ challenge }, 201, undefined, corsOrigin);
     }
 
@@ -396,7 +370,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (!challenge || !overview || challenge.teamId !== overview.team.id) return error('CHALLENGE_FORBIDDEN', '无法参加该挑战。', 403, undefined, corsOrigin);
       if (challenge.status !== 'open' || challenge.deadlineAt <= new Date().toISOString()) return error('CHALLENGE_CLOSED', '挑战已经截止。', 409, undefined, corsOrigin);
       const started = await store.startChallenge(challenge.id, user.id);
-      return json({ participation: started.participation, duplicate: started.duplicate, session: { ...started.game, questions: started.game.questionIds.map(publicQuestion) } }, started.duplicate ? 200 : 201, undefined, corsOrigin);
+      return json({ participation: started.participation, duplicate: started.duplicate, session: { ...started.game, questions: (await sessionQuestions(store, started.game)).map(publicQuestion) } }, started.duplicate ? 200 : 201, undefined, corsOrigin);
     }
 
     const challengeAnswerMatch = path.match(/^\/api\/challenges\/([^/]+)\/answers$/);
@@ -459,6 +433,28 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (all) requireRole(user, ['editor', 'admin']);
       const result = pageOf(await store.listImports(user.id, all), url);
       return json({ imports: result.items, pagination: result.pagination }, 200, undefined, corsOrigin);
+    }
+
+    const contentAudioMatch = path.match(/^\/api\/content\/([^/]+)\/versions\/(\d+)\/audio$/);
+    if (request.method === 'GET' && contentAudioMatch) {
+      const user = await auth.requireUser(request);
+      const content = await store.getContentVersion(contentAudioMatch[1], Number(contentAudioMatch[2]));
+      const sessionId = url.searchParams.get('session_id');
+      const session = sessionId ? await store.getSession(sessionId) : undefined;
+      const frozenAccess = session?.userId === user.id && session.questionIds.some(id => id.split(':')[0] === content?.id && session.questionVersions?.[id] === content.version);
+      const publishedAccess = content?.status === 'published' && (content.visibility === 'public' || content.ownerId === user.id);
+      if (!content || content.kind !== 'listening' || (!frozenAccess && !publishedAccess)) return error('CONTENT_NOT_FOUND', '没有找到可访问的音频内容。', 404, undefined, corsOrigin);
+      const asset = await store.getAsset(String(content.payload.asset_id));
+      if (!asset || !asset.mimeType.startsWith('audio/')) return error('ASSET_NOT_FOUND', '音频不存在。', 404, undefined, corsOrigin);
+      if ((process.env.UPLOAD_DRIVER ?? 'local') === 'cos') return new Response(null, { status: 302, headers: { location: await createCosDownloadUrl(asset.objectKey), 'cache-control': 'private, no-store' } });
+      return new Response(Uint8Array.from(await readLocalAsset(asset.objectKey)).buffer, { headers: { 'content-type': asset.mimeType, 'cache-control': 'private, no-store' } });
+    }
+
+    if (request.method === 'GET' && path === '/api/question-bank') {
+      const user = await auth.requireUser(request);
+      const kind = url.searchParams.get('kind') ?? 'word';
+      const items = (await store.listPublishedContent(kind, user.id)).filter(item => !contentErrors(item.kind, item.payload).length).map(item => ({ id: item.id, version: item.version, kind: item.kind, title: item.payload.word ?? item.payload.title ?? item.payload.prompt, source: item.payload.source, question_count: questionsFromContent(item).length }));
+      return json(pageOf(items, url), 200, undefined, corsOrigin);
     }
 
     const assetDownloadMatch = path.match(/^\/api\/assets\/([^/]+)\/download$/);
@@ -556,6 +552,10 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (!record) return error('CONTENT_NOT_FOUND', '没有找到该内容。', 404, undefined, corsOrigin);
       if (contentStatusMatch[2] === 'publish') {
         const errors = contentErrors(record.kind, record.payload);
+        if (record.kind === 'listening' && record.payload.asset_id) {
+          const asset = await store.getAsset(String(record.payload.asset_id));
+          if (!asset || !asset.mimeType.startsWith('audio/') || (user.role !== 'admin' && asset.ownerId !== user.id)) errors.push('音频不存在、类型不符或无权使用');
+        }
         if (errors.length) return error('CONTENT_VALIDATION_FAILED', '内容字段校验未通过。', 422, { errors }, corsOrigin);
       }
       const status: ContentRecord['status'] = contentStatusMatch[2] === 'publish' ? 'published' : 'withdrawn';
@@ -567,11 +567,20 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const user = await auth.requireUser(request);
       const body = await readJson(request);
       if (!body) return error('INVALID_JSON', '请求体必须是有效 JSON。', 400);
-      const source = typeof body.source === 'string' ? body.source : 'due_reviews';
+      const source = typeof body.source === 'string' ? body.source : 'new_words';
       const mode: SessionMode = body.mode === 'challenge' ? 'challenge' : 'practice';
-      const selectedQuestions = source === 'listening' ? questions.filter(question => question.id.startsWith('l-')) : source === 'reading' ? questions.filter(question => question.id.startsWith('r-')) : questions.filter(question => question.id.startsWith('w-')).slice(0, 5);
-      const session = await store.createSession({ userId: user.id, source, mode, questionIds: selectedQuestions.map(question => question.id) });
-      return json({ session: { ...session, questions: session.questionIds.map(publicQuestion) } }, 201, undefined, corsOrigin);
+      if (!['new_words', 'due_reviews', 'listening', 'reading', 'game'].includes(source)) return error('INVALID_SOURCE', '题源无效。', 422, undefined, corsOrigin);
+      const kind = source === 'listening' || source === 'reading' ? source : 'word';
+      let pool = await publishedQuestions(store, kind, user.id);
+      if (typeof body.content_item_id === 'string') pool = pool.filter(q => q.contentItemId === body.content_item_id);
+      if (source === 'due_reviews') {
+        const due = new Set((await store.listReviews(user.id, new Date().toISOString())).map(r => r.contentItemId));
+        pool = pool.filter(q => due.has(q.contentItemId ?? q.id));
+      }
+      if (!pool.length) return error('QUESTION_BANK_EMPTY', source === 'due_reviews' ? '当前没有到期的已发布单词，可先学习新词。' : '当前没有可用的已发布题目，请在内容后台录入并发布。', 409, undefined, corsOrigin);
+      const selectedQuestions = kind === 'word' ? sampleQuestions(pool, 5) : (() => { const first = sampleQuestions(pool, 1)[0]; return pool.filter(q => q.contentItemId === first.contentItemId); })();
+      const session = await store.createSession({ userId: user.id, source, mode, ...freezeQuestions(selectedQuestions) });
+      return json({ session: { ...session, questions: selectedQuestions.map(publicQuestion) } }, 201, undefined, corsOrigin);
     }
 
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
@@ -587,7 +596,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const user = await auth.requireUser(request);
       const session = await store.getSession(resumeMatch[1]);
       if (!session || session.userId !== user.id) return error('SESSION_NOT_FOUND', '没有找到该学习会话。', 404, undefined, corsOrigin);
-      return json({ session: { ...session, questions: session.questionIds.map(publicQuestion) }, attempts: await store.attemptsForSession(session.id) }, 200, undefined, corsOrigin);
+      return json({ session: { ...session, questions: (await sessionQuestions(store, session)).map(publicQuestion) }, attempts: await store.attemptsForSession(session.id) }, 200, undefined, corsOrigin);
     }
 
     const answerMatch = path.match(/^\/api\/sessions\/([^/]+)\/answers$/);
@@ -602,7 +611,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const questionVersion = typeof body.question_version === 'number' ? body.question_version : -1;
       const answerIndex = typeof body.answer === 'number' ? body.answer : -1;
       const idempotencyKey = typeof body.idempotency_key === 'string' ? body.idempotency_key : request.headers.get('idempotency-key') ?? '';
-      const question = questionById.get(questionId);
+      const question = (await sessionQuestions(store, session)).find(q => q.id === questionId);
       if (!question || !session.questionIds.includes(questionId)) return error('QUESTION_NOT_IN_SESSION', '题目不属于该学习会话。', 422);
       if (question.version !== questionVersion) return error('QUESTION_VERSION_MISMATCH', '题目版本已经变化，请重新获取会话。', 409, { expected: question.version });
       if (!Number.isInteger(answerIndex) || answerIndex < 0 || answerIndex >= question.options.length) return error('INVALID_ANSWER', '答案选项无效。', 422);
@@ -631,7 +640,12 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const finishedAll = attempts.length === session.questionIds.length;
       const now = new Date().toISOString();
       const reviewSkill = session.source === 'listening' ? 'listening' : session.source === 'reading' ? 'reading' : 'meaning';
-      for (const attempt of attempts) await store.updateReviewState(user.id, attempt.questionId, reviewSkill, attempt.correct, now);
+      const frozen = await sessionQuestions(store, session);
+      for (const contentId of new Set(frozen.map(q => q.contentItemId ?? q.id))) {
+        const ids = new Set(frozen.filter(q => (q.contentItemId ?? q.id) === contentId).map(q => q.id));
+        const answered = attempts.filter(a => ids.has(a.questionId));
+        if (answered.length) await store.updateReviewState(user.id, contentId, reviewSkill, answered.length === ids.size && answered.every(a => a.correct), now);
+      }
       const taskKey = session.source === 'new_words' ? 'new_words' : session.source === 'game' ? 'game' : session.source === 'listening' || session.source === 'reading' ? 'input' : 'review';
       const tier = await store.getPlanTier(user.id, shanghaiDate());
       const tasks = await store.incrementDailyTask(user.id, shanghaiDate(), taskKey, attempts.length, tier);

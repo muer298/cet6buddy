@@ -15,9 +15,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: 'include',
     headers: { ...(isForm ? {} : { 'content-type': 'application/json' }), ...init?.headers },
   });
-  const payload = await response.json() as T & { error?: { code?: string; message?: string } };
+  const payload = await response.json() as T & { error?: { code?: string; message?: string; details?: { errors?: string[] } } };
   if (!response.ok) {
-    throw new ApiError(payload.error?.message ?? '请求失败，请稍后重试。', payload.error?.code ?? 'REQUEST_FAILED', response.status);
+    throw new ApiError([payload.error?.message ?? '请求失败，请稍后重试。', ...(payload.error?.details?.errors ?? [])].join('；'), payload.error?.code ?? 'REQUEST_FAILED', response.status);
   }
   return payload;
 }
@@ -102,7 +102,7 @@ export interface FinishResponse {
   reward: { points: number; awarded: boolean; reward_key?: string; reason?: string };
 }
 
-export function createStudySession(source = 'due_reviews'): Promise<StudySessionResponse> {
+export function createStudySession(source = 'new_words'): Promise<StudySessionResponse> {
   return request('/api/study/sessions', {
     method: 'POST',
     body: JSON.stringify({ source, mode: 'practice' }),
@@ -125,8 +125,8 @@ export function submitSessionAnswer(sessionId: string, question: Question, answe
   });
 }
 
-export function submitSpellingAttempt(question: Question, answerText: string, idempotencyKey: string): Promise<{ feedback: { correct: boolean; correct_answer: string }; duplicate: boolean }> {
-  return request('/api/spelling-attempts', { method: 'POST', body: JSON.stringify({ content_item_id: question.id, content_version: question.version, answer_text: answerText, idempotency_key: idempotencyKey }) });
+export function submitSpellingAttempt(question: Question, answerText: string, idempotencyKey: string, sessionId?: string): Promise<{ feedback: { correct: boolean; correct_answer: string }; duplicate: boolean }> {
+  return request('/api/spelling-attempts', { method: 'POST', body: JSON.stringify({ content_item_id: question.id, content_version: question.version, answer_text: answerText, idempotency_key: idempotencyKey, session_id: sessionId }) });
 }
 
 export function finishStudySession(sessionId: string): Promise<FinishResponse> {
@@ -255,12 +255,16 @@ export interface ManagedContent {
   createdAt: string;
 }
 
-export function getManagedContent(): Promise<{ content: ManagedContent[] }> {
-  return request('/api/admin/content');
+export function getManagedContent(page = 1): Promise<{ content: ManagedContent[]; pagination: { page: number; pages: number; total: number } }> {
+  return request(`/api/admin/content?page=${page}&page_size=20`);
 }
 
-export function createManagedContent(kind: string, payload: Record<string, unknown>): Promise<{ content: ManagedContent; validation_errors: string[] }> {
-  return request('/api/admin/content', { method: 'POST', body: JSON.stringify({ kind, visibility: 'public', payload }) });
+export function createManagedContent(kind: string, payload: Record<string, unknown>, visibility = 'private'): Promise<{ content: ManagedContent; validation_errors: string[] }> {
+  return request('/api/admin/content', { method: 'POST', body: JSON.stringify({ kind, visibility, payload }) });
+}
+
+export function createManagedContentVersion(id: string, payload: Record<string, unknown>): Promise<{ content: ManagedContent; validation_errors: string[] }> {
+  return request(`/api/admin/content/${id}/versions`, { method: 'POST', body: JSON.stringify({ payload }) });
 }
 
 export function setManagedContentStatus(contentId: string, action: 'publish' | 'withdraw'): Promise<{ content: ManagedContent }> {

@@ -1,0 +1,10 @@
+{
+  "version": "2.0",
+  "statement": [
+    {
+      "effect": "allow",
+      "action": ["name/cos:PutObject", "name/cos:HeadObject", "name/cos:GetObject"],
+      "resource": ["qcs::cos:ap-hongkong:uid/1421801104:cet6-1421801104/private/*"]
+    }
+  ]
+}

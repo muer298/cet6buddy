@@ -69,7 +69,7 @@ export interface StudyStore {
   schedulePlan(userId: string, tier: UserAccount['planTier'], effectiveDate: string, examDate?: string): Promise<void>;
   getCheckin(userId: string, planDate: string): Promise<{ id: string; userId: string; checkinDate: string; planTier: UserAccount['planTier']; createdAt: string } | undefined>;
   createCheckin(userId: string, planDate: string, tier: UserAccount['planTier']): Promise<{ id: string; userId: string; checkinDate: string; planTier: UserAccount['planTier']; createdAt: string }>;
-  createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord>;
+  createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; questionVersions?: Record<string, number>; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord>;
   getGameSession(sessionId: string): Promise<GameSessionRecord | undefined>;
   submitGameAnswer(input: { gameSessionId: string; userId: string; questionId: string; questionVersion: number; answerIndex: number | null; correct: boolean; idempotencyKey: string }): Promise<{ attempt: GameAttemptRecord; session: GameSessionRecord; duplicate: boolean }>;
   gameAttempts(sessionId: string): Promise<GameAttemptRecord[]>;
@@ -92,6 +92,8 @@ export interface StudyStore {
   createContent(input: { kind: string; ownerId?: string; visibility: ContentRecord['visibility']; payload: Record<string, unknown> }): Promise<ContentRecord>;
   createContentVersion(contentItemId: string, payload: Record<string, unknown>): Promise<ContentRecord | undefined>;
   listContent(): Promise<ContentRecord[]>;
+  listPublishedContent(kind: string, userId?: string): Promise<ContentRecord[]>;
+  getContentVersion(id: string, version: number): Promise<ContentRecord | undefined>;
   updateContentStatus(contentItemId: string, version: number, status: ContentRecord['status'], actorUserId: string, reason?: string): Promise<ContentRecord | undefined>;
   close?(): Promise<void>;
 }
@@ -357,7 +359,7 @@ export class InMemoryStore implements StudyStore {
     return checkin;
   }
 
-  async createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord> {
+  async createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; questionVersions?: Record<string, number>; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord> {
     const session: GameSessionRecord = { ...input, id: randomUUID(), status: 'active', score: 0, correctCount: 0, currentStreak: 0, longestStreak: 0, createdAt: new Date().toISOString() };
     this.gameSessions.set(session.id, session);
     return session;
@@ -451,7 +453,7 @@ export class InMemoryStore implements StudyStore {
     if (existing) return { participation: existing, game: this.gameSessions.get(existing.gameSessionId)!, duplicate: true };
     const challenge = this.challenges.get(challengeId);
     if (!challenge) throw new Error('CHALLENGE_NOT_FOUND');
-    const game = await this.createGameSession({ userId, gameType: challenge.gameType, mode: 'challenge', questionIds: challenge.questionIds, rules: challenge.rules });
+    const game = await this.createGameSession({ userId, gameType: challenge.gameType, mode: 'challenge', questionIds: challenge.questionIds, questionVersions: challenge.questionVersions, rules: challenge.rules });
     const participation: ChallengeParticipation = { id: randomUUID(), challengeId, userId, gameSessionId: game.id, status: 'active', score: 0, correctCount: 0, longestStreak: 0, startedAt: new Date().toISOString() };
     this.participations.set(`${challengeId}:${userId}`, participation);
     return { participation, game, duplicate: false };
@@ -521,9 +523,20 @@ export class InMemoryStore implements StudyStore {
     return [...this.content.values()].map(versions => versions.at(-1)!).filter(Boolean);
   }
 
-  async updateContentStatus(contentItemId: string, version: number, status: ContentRecord['status']): Promise<ContentRecord | undefined> {
+  async listPublishedContent(kind: string, userId?: string): Promise<ContentRecord[]> {
+    return [...this.content.values()].map(versions => versions.filter(v => v.status === 'published').at(-1)).filter((v): v is ContentRecord => Boolean(v && v.kind === kind && (v.visibility === 'public' || (userId && v.ownerId === userId))));
+  }
+
+  async getContentVersion(id: string, version: number): Promise<ContentRecord | undefined> {
+    return this.content.get(id)?.find(item => item.version === version);
+  }
+
+  async updateContentStatus(contentItemId: string, version: number, status: ContentRecord['status'], _actorUserId?: string, _reason?: string): Promise<ContentRecord | undefined> {
     const record = this.content.get(contentItemId)?.find(item => item.version === version);
-    if (record) record.status = status;
+    if (record) {
+      if (status === 'withdrawn' || status === 'published') for (const item of this.content.get(contentItemId) ?? []) if (item.status === 'published') item.status = 'withdrawn';
+      record.status = status;
+    }
     return record;
   }
 }

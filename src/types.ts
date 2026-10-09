@@ -37,6 +37,10 @@ export interface Question {
   phonetic: string;
   prompt: string;
   options: string[];
+  contentItemId?: string;
+  source?: string;
+  passage?: string;
+  audioUrl?: string;
   correctIndex?: number;
   hint?: string;
 }

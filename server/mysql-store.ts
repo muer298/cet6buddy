@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import type { AssetRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PasswordCredential, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
 import { dailyTaskDefinitions, nextReviewInterval, type StudyStore } from './store.ts';
+import { decodeSelection, encodeSelection } from './question-bank.ts';
 
 interface SessionRow extends RowDataPacket {
   id: string;
@@ -66,10 +67,6 @@ function timestamp(value: string | Date): string {
   return new Date(normalized).toISOString();
 }
 
-function jsonArray(value: string | string[]): string[] {
-  return Array.isArray(value) ? value : JSON.parse(value) as string[];
-}
-
 function mapSession(row: SessionRow): StudySession {
   return {
     id: row.id,
@@ -77,7 +74,7 @@ function mapSession(row: SessionRow): StudySession {
     source: row.source,
     mode: row.mode,
     status: row.status,
-    questionIds: jsonArray(row.question_ids_json),
+    ...decodeSelection(row.question_ids_json),
     createdAt: timestamp(row.created_at),
     finishedAt: row.finished_at ? timestamp(row.finished_at) : undefined,
   };
@@ -144,7 +141,7 @@ function mapGameSession(row: RowDataPacket & Record<string, unknown>): GameSessi
   return {
     id: String(row.id), userId: String(row.user_id), gameType: row.game_type as GameType,
     mode: row.mode as GameSessionRecord['mode'], status: row.status as GameSessionRecord['status'],
-    questionIds: parseJson(row.question_ids_json as string | string[]), rules: parseJson(row.rules_json as string | GameSessionRecord['rules']),
+    ...decodeSelection(row.question_ids_json), rules: parseJson(row.rules_json as string | GameSessionRecord['rules']),
     score: Number(row.score), correctCount: Number(row.correct_count), currentStreak: Number(row.current_streak), longestStreak: Number(row.longest_streak),
     createdAt: timestamp(row.created_at as string | Date), finishedAt: row.finished_at ? timestamp(row.finished_at as string | Date) : undefined,
   };
@@ -168,7 +165,7 @@ function mapTeam(row: RowDataPacket & Record<string, unknown>): TeamRecord {
 function mapChallenge(row: RowDataPacket & Record<string, unknown>): ChallengeRecord {
   return {
     id: String(row.id), teamId: String(row.team_id), creatorId: String(row.creator_id), gameType: row.game_type as GameType,
-    title: String(row.title), questionIds: parseJson(row.question_ids_json as string | string[]), rules: parseJson(row.rules_json as string | GameSessionRecord['rules']),
+    title: String(row.title), ...decodeSelection(row.question_ids_json), rules: parseJson(row.rules_json as string | GameSessionRecord['rules']),
     status: row.status as ChallengeRecord['status'], deadlineAt: timestamp(row.deadline_at as string | Date), createdAt: timestamp(row.created_at as string | Date),
   };
 }
@@ -208,7 +205,7 @@ export class MysqlStore implements StudyStore {
       `INSERT INTO study_sessions
         (id, user_id, source, mode, status, question_ids_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [session.id, session.userId, session.source, session.mode, session.status, JSON.stringify(session.questionIds), new Date(session.createdAt)],
+      [session.id, session.userId, session.source, session.mode, session.status, encodeSelection(session), new Date(session.createdAt)],
     );
     return session;
   }
@@ -662,12 +659,12 @@ export class MysqlStore implements StudyStore {
     }
   }
 
-  async createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord> {
+  async createGameSession(input: { userId: string; gameType: GameType; mode: GameSessionRecord['mode']; questionIds: string[]; questionVersions?: Record<string, number>; rules: GameSessionRecord['rules'] }): Promise<GameSessionRecord> {
     const session: GameSessionRecord = { ...input, id: randomUUID(), status: 'active', score: 0, correctCount: 0, currentStreak: 0, longestStreak: 0, createdAt: new Date().toISOString() };
     await this.pool.execute(
       `INSERT INTO game_sessions (id, user_id, game_type, mode, status, rules_json, question_ids_json, created_at)
        VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`,
-      [session.id, session.userId, session.gameType, session.mode, JSON.stringify(session.rules), JSON.stringify(session.questionIds), new Date(session.createdAt)],
+      [session.id, session.userId, session.gameType, session.mode, JSON.stringify(session.rules), encodeSelection(session), new Date(session.createdAt)],
     );
     return session;
   }
@@ -815,7 +812,7 @@ export class MysqlStore implements StudyStore {
     await this.pool.execute(
       `INSERT INTO challenges (id, team_id, creator_id, game_type, title, rules_json, question_ids_json, status, deadline_at, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-      [challenge.id, challenge.teamId, challenge.creatorId, challenge.gameType, challenge.title, JSON.stringify(challenge.rules), JSON.stringify(challenge.questionIds), new Date(challenge.deadlineAt), new Date(challenge.createdAt)],
+      [challenge.id, challenge.teamId, challenge.creatorId, challenge.gameType, challenge.title, JSON.stringify(challenge.rules), encodeSelection(challenge), new Date(challenge.deadlineAt), new Date(challenge.createdAt)],
     );
     return challenge;
   }
@@ -850,7 +847,7 @@ export class MysqlStore implements StudyStore {
     }
     const challenge = await this.getChallenge(challengeId);
     if (!challenge) throw new Error('CHALLENGE_NOT_FOUND');
-    const game = await this.createGameSession({ userId, gameType: challenge.gameType, mode: 'challenge', questionIds: challenge.questionIds, rules: challenge.rules });
+    const game = await this.createGameSession({ userId, gameType: challenge.gameType, mode: 'challenge', questionIds: challenge.questionIds, questionVersions: challenge.questionVersions, rules: challenge.rules });
     const participation: ChallengeParticipation = { id: randomUUID(), challengeId, userId, gameSessionId: game.id, status: 'active', score: 0, correctCount: 0, longestStreak: 0, startedAt: new Date().toISOString() };
     try {
       await this.pool.execute(
@@ -947,14 +944,20 @@ export class MysqlStore implements StudyStore {
   }
 
   async createContentVersion(contentItemId: string, payload: Record<string, unknown>): Promise<ContentRecord | undefined> {
-    const [itemRows] = await this.pool.execute<Array<RowDataPacket & { id: string; kind: string; owner_id: string | null; visibility: ContentRecord['visibility'] }>>(`SELECT id, kind, owner_id, visibility FROM content_items WHERE id = ?`, [contentItemId]);
-    if (!itemRows[0]) return undefined;
-    const [versionRows] = await this.pool.execute<Array<RowDataPacket & { next_version: number }>>(`SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM content_versions WHERE content_item_id = ?`, [contentItemId]);
-    const version = Number(versionRows[0].next_version);
-    const createdAt = new Date().toISOString();
-    await this.pool.execute(`INSERT INTO content_versions (id, content_item_id, version, payload_json, status, created_at) VALUES (?, ?, ?, ?, 'draft', ?)`, [randomUUID(), contentItemId, version, JSON.stringify(payload), new Date(createdAt)]);
-    const item = itemRows[0];
-    return { id: contentItemId, kind: item.kind, ownerId: item.owner_id ?? undefined, visibility: item.visibility, version, payload, status: 'draft', createdAt };
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [itemRows] = await connection.execute<Array<RowDataPacket & { id: string; kind: string; owner_id: string | null; visibility: ContentRecord['visibility'] }>>(`SELECT id, kind, owner_id, visibility FROM content_items WHERE id = ? FOR UPDATE`, [contentItemId]);
+      if (!itemRows[0]) { await connection.rollback(); return undefined; }
+      const [versionRows] = await connection.execute<Array<RowDataPacket & { next_version: number }>>(`SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM content_versions WHERE content_item_id = ?`, [contentItemId]);
+      const version = Number(versionRows[0].next_version);
+      const createdAt = new Date().toISOString();
+      await connection.execute(`INSERT INTO content_versions (id, content_item_id, version, payload_json, status, created_at) VALUES (?, ?, ?, ?, 'draft', ?)`, [randomUUID(), contentItemId, version, JSON.stringify(payload), new Date(createdAt)]);
+      await connection.commit();
+      const item = itemRows[0];
+      return { id: contentItemId, kind: item.kind, ownerId: item.owner_id ?? undefined, visibility: item.visibility, version, payload, status: 'draft', createdAt };
+    } catch (cause) { await connection.rollback(); throw cause; }
+    finally { connection.release(); }
   }
 
   async listContent(): Promise<ContentRecord[]> {
@@ -968,12 +971,39 @@ export class MysqlStore implements StudyStore {
     return rows.map(row => ({ id: String(row.id), kind: String(row.kind), ownerId: row.owner_id ? String(row.owner_id) : undefined, visibility: row.visibility as ContentRecord['visibility'], version: Number(row.version), payload: parseJson(row.payload_json as string | Record<string, unknown>), status: row.status as ContentRecord['status'], createdAt: timestamp(row.created_at as string | Date) }));
   }
 
+  async listPublishedContent(kind: string, userId?: string): Promise<ContentRecord[]> {
+    const [rows] = await this.pool.execute<Array<RowDataPacket & Record<string, unknown>>>(
+      `SELECT ci.id, ci.kind, ci.owner_id, ci.visibility, cv.version, cv.payload_json, cv.status, cv.created_at
+       FROM content_items ci JOIN content_versions cv ON cv.content_item_id = ci.id
+       WHERE ci.kind = ? AND (ci.visibility = 'public' OR ci.owner_id = ?) AND cv.status = 'published'
+       AND cv.version = (SELECT MAX(v.version) FROM content_versions v WHERE v.content_item_id = ci.id AND v.status = 'published')
+       ORDER BY ci.id`, [kind, userId ?? null]);
+    return rows.map(row => ({ id: String(row.id), kind: String(row.kind), ownerId: row.owner_id ? String(row.owner_id) : undefined, visibility: row.visibility as ContentRecord['visibility'], version: Number(row.version), payload: parseJson(row.payload_json as string | Record<string, unknown>), status: row.status as ContentRecord['status'], createdAt: timestamp(row.created_at as string | Date) }));
+  }
+
+  async getContentVersion(id: string, version: number): Promise<ContentRecord | undefined> {
+    const [rows] = await this.pool.execute<Array<RowDataPacket & Record<string, unknown>>>(
+      `SELECT ci.id, ci.kind, ci.owner_id, ci.visibility, cv.version, cv.payload_json, cv.status, cv.created_at
+       FROM content_items ci JOIN content_versions cv ON cv.content_item_id = ci.id WHERE ci.id = ? AND cv.version = ?`, [id, version]);
+    const row = rows[0];
+    return row ? { id: String(row.id), kind: String(row.kind), ownerId: row.owner_id ? String(row.owner_id) : undefined, visibility: row.visibility as ContentRecord['visibility'], version: Number(row.version), payload: parseJson(row.payload_json as string | Record<string, unknown>), status: row.status as ContentRecord['status'], createdAt: timestamp(row.created_at as string | Date) } : undefined;
+  }
+
   async updateContentStatus(contentItemId: string, version: number, status: ContentRecord['status'], actorUserId: string, reason?: string): Promise<ContentRecord | undefined> {
-    const [result] = await this.pool.execute<ResultSetHeader>(`UPDATE content_versions SET status = ? WHERE content_item_id = ? AND version = ?`, [status, contentItemId, version]);
-    if (!result.affectedRows) return undefined;
-    const action = status === 'published' ? 'published' : status === 'withdrawn' ? 'withdrawn' : 'submitted';
-    await this.pool.execute(`INSERT INTO publication_events (id, content_item_id, content_version, action, actor_user_id, reason) VALUES (?, ?, ?, ?, ?, ?)`, [randomUUID(), contentItemId, version, action, actorUserId, reason ?? null]);
-    return (await this.listContent()).find(item => item.id === contentItemId && item.version === version);
+    const connection = await this.pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute('SELECT id FROM content_items WHERE id = ? FOR UPDATE', [contentItemId]);
+      const [rows] = await connection.execute<RowDataPacket[]>('SELECT version FROM content_versions WHERE content_item_id = ? AND version = ?', [contentItemId, version]);
+      if (!rows.length) { await connection.rollback(); return undefined; }
+      if (status === 'published' || status === 'withdrawn') await connection.execute("UPDATE content_versions SET status = 'withdrawn' WHERE content_item_id = ? AND status = 'published'", [contentItemId]);
+      await connection.execute('UPDATE content_versions SET status = ? WHERE content_item_id = ? AND version = ?', [status, contentItemId, version]);
+      const action = status === 'published' ? 'published' : status === 'withdrawn' ? 'withdrawn' : 'submitted';
+      await connection.execute(`INSERT INTO publication_events (id, content_item_id, content_version, action, actor_user_id, reason) VALUES (?, ?, ?, ?, ?, ?)`, [randomUUID(), contentItemId, version, action, actorUserId, reason ?? null]);
+      await connection.commit();
+    } catch (cause) { await connection.rollback(); throw cause; }
+    finally { connection.release(); }
+    return this.getContentVersion(contentItemId, version);
   }
 
   async close(): Promise<void> {

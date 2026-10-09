@@ -33,14 +33,10 @@ a { color: inherit; text-decoration: none; }
 
 .app-frame { min-height: 100vh; }
 .phone-shell { position: relative; width: min(100%, 430px); min-height: 100vh; margin: 0 auto; background: var(--paper); overflow: hidden; box-shadow: 0 0 0 1px rgba(50,40,95,.04), 0 20px 70px rgba(48,38,91,.18); }
-.page { min-height: 100vh; padding: 16px 18px calc(102px + env(safe-area-inset-bottom)); animation: page-in .28s ease both; }
+.page { min-height: 100vh; padding: calc(16px + env(safe-area-inset-top)) 18px calc(102px + env(safe-area-inset-bottom)); animation: page-in .28s ease both; }
 .page.no-nav { padding-bottom: 32px; }
 @keyframes page-in { from { opacity: 0; transform: translateY(6px); } }
 
-.statusbar { display: flex; justify-content: space-between; align-items: center; height: 24px; font-size: 12px; font-weight: 800; letter-spacing: .2px; }
-.status-icons { display: flex; gap: 6px; align-items: center; }
-.status-dot { width: 14px; height: 8px; border: 2px solid var(--ink); border-radius: 3px; position: relative; }
-.status-dot::after { content:""; position:absolute; inset:1px; background:var(--ink); border-radius:1px; }
 
 .topbar { display:flex; align-items:center; justify-content:space-between; min-height:56px; gap:12px; }
 .topbar h1, .topbar h2 { margin:0; font-size:22px; letter-spacing:-.5px; }

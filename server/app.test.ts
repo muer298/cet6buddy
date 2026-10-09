@@ -4,6 +4,9 @@ import { createApp } from './app.ts';
 import { hashPassword } from './auth.ts';
 import { InMemoryStore, type StudyStore } from './store.ts';
 import type { UserRole } from './types.ts';
+import { legacyContent } from './legacy-content.ts';
+import { questionById } from './data.ts';
+import { decodeSelection, encodeSelection } from './question-bank.ts';
 
 async function body(response: Response): Promise<Record<string, any>> {
   return await response.json() as Record<string, any>;
@@ -11,7 +14,15 @@ async function body(response: Response): Promise<Record<string, any>> {
 
 const TEST_PASSWORD = 'Test-password-2026';
 
+test('question reference codec preserves both legacy arrays and frozen versions', () => {
+  assert.deepEqual(decodeSelection('["legacy"]'), { questionIds: ['legacy'] });
+  const selection = { questionIds: ['custom'], questionVersions: { custom: 3 } };
+  assert.deepEqual(decodeSelection(encodeSelection(selection)), selection);
+  assert.deepEqual(decodeSelection(JSON.parse(encodeSelection(selection))), selection);
+});
+
 async function authenticated(email = 'learner@example.com', store: StudyStore = new InMemoryStore(), role: UserRole = 'learner') {
+  if (store instanceof InMemoryStore && !store.content.size) for (const item of legacyContent) store.content.set(item.id, [{ ...item, visibility: 'public', status: 'published', createdAt: new Date().toISOString() }]);
   const username = email.split('@')[0].replace(/[^a-z0-9_.-]/g, '-');
   if (!await store.findUserByEmail(email)) {
     await store.createPasswordUser({ username, email, nickname: username, role, passwordHash: await hashPassword(TEST_PASSWORD), mustChangePassword: false });
@@ -54,7 +65,7 @@ test('CORS preflight returns the required headers without a response body', asyn
 
 test('practice session never exposes answers before submission', async () => {
   const { request } = await authenticated();
-  const response = await request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ source: 'due_reviews', mode: 'practice' }) });
+  const response = await request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ source: 'new_words', mode: 'practice' }) });
   const responseBody = await body(response);
   assert.equal(response.status, 201);
   assert.equal(responseBody.session.questions.length, 5);
@@ -66,7 +77,8 @@ test('answer submission is idempotent and locks the first answer', async () => {
   const { request } = await authenticated();
   const created = await body(await request('http://local/api/study/sessions', { method: 'POST', body: '{}' }));
   const sessionId = created.session.id as string;
-  const payload = { question_id: 'w-sustainable', question_version: 1, answer: 1, idempotency_key: 'answer-001' };
+  const q = created.session.questions[0];
+  const payload = { question_id: q.id, question_version: q.version, answer: questionById.get(q.id)!.correctIndex, idempotency_key: 'answer-001' };
 
   const first = await body(await request(`http://local/api/sessions/${sessionId}/answers`, { method: 'POST', body: JSON.stringify(payload) }));
   const repeated = await body(await request(`http://local/api/sessions/${sessionId}/answers`, { method: 'POST', body: JSON.stringify({ ...payload, answer: 0 }) }));
@@ -85,7 +97,7 @@ test('version mismatch is rejected with a stable error code', async () => {
   const created = await body(await request('http://local/api/study/sessions', { method: 'POST', body: '{}' }));
   const response = await request(`http://local/api/sessions/${created.session.id}/answers`, {
     method: 'POST',
-    body: JSON.stringify({ question_id: 'w-sustainable', question_version: 99, answer: 1, idempotency_key: 'version-test' }),
+    body: JSON.stringify({ question_id: created.session.questions[0].id, question_version: 99, answer: 1, idempotency_key: 'version-test' }),
   });
   assert.equal(response.status, 409);
   assert.equal((await body(response)).error.code, 'QUESTION_VERSION_MISMATCH');
@@ -212,10 +224,9 @@ test('server-authoritative streak game computes bonuses and daily reward', async
   const created = await body(await request('http://local/api/games/sessions', {
     method: 'POST', body: JSON.stringify({ game_type: 'streak' }),
   }));
-  const answers = [1, 0, 1, 1, 1, 0, 2, 0, 1, 2];
   for (const [index, question] of created.session.questions.entries()) {
     const result = await body(await request(`http://local/api/game-sessions/${created.session.id}/answers`, {
-      method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: answers[index], idempotency_key: `game-${index}` }),
+      method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: questionById.get(question.id)!.correctIndex, idempotency_key: `game-${index}` }),
     }));
     assert.equal(result.accepted, true);
   }
@@ -242,10 +253,9 @@ test('team invitations and asynchronous challenge allow one ranked participation
   const challenge = await body(await owner.request('http://local/api/challenges', { method: 'POST', body: JSON.stringify({ game_type: 'root-chain', title: '周末词根挑战' }) }));
   const started = await body(await memberRequest(`http://local/api/challenges/${challenge.challenge.id}/start`, { method: 'POST' }));
   assert.equal(started.duplicate, false);
-  const answers = [1, 0, 1, 1, 1];
   for (const [index, question] of started.session.questions.entries()) {
     const response = await body(await memberRequest(`http://local/api/challenges/${challenge.challenge.id}/answers`, {
-      method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: answers[index], idempotency_key: `challenge-${index}` }),
+      method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: questionById.get(question.id)!.correctIndex, idempotency_key: `challenge-${index}` }),
     }));
     assert.equal(response.feedback, null);
   }
@@ -290,7 +300,7 @@ test('admin content publishing enforces role and required fields', async () => {
   assert.equal(rejected.status, 422);
   assert.equal((await body(rejected)).error.code, 'CONTENT_VALIDATION_FAILED');
 
-  const valid = await body(await adminRequest('http://local/api/admin/content', { method: 'POST', body: JSON.stringify({ kind: 'word', payload: { word: 'coherent', meaning: '连贯的' } }) }));
+  const valid = await body(await adminRequest('http://local/api/admin/content', { method: 'POST', body: JSON.stringify({ kind: 'word', payload: { ...legacyContent[0].payload, word: 'coherent', meaning: '连贯的' } }) }));
   const published = await body(await adminRequest(`http://local/api/admin/content/${valid.content.id}/publish`, { method: 'POST', body: '{}' }));
   assert.equal(published.content.status, 'published');
 });
@@ -343,4 +353,101 @@ test('spelling attempts are stored separately and update the spelling review que
   assert.equal(repeated.feedback.correct, false);
   const reviews = await body(await session.request('http://local/api/me/reviews?due_before=2099-01-01T00:00:00.000Z'));
   assert.ok(reviews.reviews.some((item: Record<string, unknown>) => item.skill === 'spelling'));
+});
+
+test('published database content drives sessions; drafts, private content and withdrawals stay isolated', async () => {
+  const store = new InMemoryStore();
+  const admin = await authenticated('bank-admin@example.com', store, 'admin');
+  const learner = await authenticated('bank-learner@example.com', store);
+  store.content.clear();
+  const create = (visibility = 'public') => admin.request('http://local/api/admin/content', { method: 'POST', body: JSON.stringify({ kind: 'word', visibility, payload: { ...legacyContent[0].payload, word: 'database-only' } }) });
+  const record = (await body(await create())).content;
+  const start = () => learner.request('http://local/api/study/sessions', { method: 'POST', body: '{}' });
+  assert.equal((await start()).status, 409); // no static fallback
+  assert.equal((await admin.request(`http://local/api/admin/content/${record.id}/publish`, { method: 'POST', body: '{}' })).status, 200);
+  const started = (await body(await start())).session;
+  assert.equal(started.questions[0].word, 'database-only');
+  assert.equal(started.questions[0].id, record.id);
+  assert.equal(started.questions[0].correctIndex, undefined);
+  assert.equal(started.questions[0].meaning, undefined);
+  const privateRecord = (await body(await create('private'))).content;
+  await admin.request(`http://local/api/admin/content/${privateRecord.id}/publish`, { method: 'POST', body: '{}' });
+  assert.equal((await body(await start())).session.questions.length, 1);
+  const newPayload = { ...record.payload, word: 'database-v2', correct_index: 0 };
+  await admin.request(`http://local/api/admin/content/${record.id}/versions`, { method: 'POST', body: JSON.stringify({ payload: newPayload }) });
+  assert.equal((await body(await start())).session.questions[0].version, 1); // draft does not shadow published v1
+  await admin.request(`http://local/api/admin/content/${record.id}/publish`, { method: 'POST', body: '{}' });
+  assert.equal((await body(await start())).session.questions[0].version, 2);
+  await admin.request(`http://local/api/admin/content/${record.id}/withdraw`, { method: 'POST', body: '{}' });
+  assert.equal((await start()).status, 409); // cannot resurrect v1
+  const resume = await body(await learner.request(`http://local/api/sessions/${started.id}/resume`));
+  assert.equal(resume.session.questions[0].word, 'database-only');
+  const answered = await body(await learner.request(`http://local/api/sessions/${started.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: record.id, question_version: 1, answer: 1, idempotency_key: 'frozen-answer' }) }));
+  assert.equal(answered.feedback.correct, true);
+  assert.equal((await admin.request(`http://local/api/sessions/${started.id}/resume`)).status, 404);
+  const bank = await body(await learner.request('http://local/api/question-bank'));
+  assert.equal(bank.items.length, 0);
+});
+
+test('challenge freezes only public question versions before participants start', async () => {
+  const store = new InMemoryStore();
+  const owner = await authenticated('freeze-owner@example.com', store);
+  const team = (await body(await owner.request('http://local/api/teams', { method: 'POST', body: JSON.stringify({ name: 'Freeze team' }) }))).team;
+  const member = await authenticated('freeze-member@example.com', store);
+  await member.request('http://local/api/teams/join', { method: 'POST', body: JSON.stringify({ invite_code: team.inviteCode }) });
+  const challenge = (await body(await owner.request('http://local/api/challenges', { method: 'POST', body: JSON.stringify({ game_type: 'streak' }) }))).challenge;
+  for (const item of await store.listContent()) await store.updateContentStatus(item.id, item.version, 'withdrawn', team.ownerId);
+  const started = await body(await member.request(`http://local/api/challenges/${challenge.id}/start`, { method: 'POST' }));
+  assert.equal(started.session.questions.length, 10);
+  assert.deepEqual(started.session.questionVersions, challenge.questionVersions);
+  assert.equal(JSON.stringify(started).includes('correctIndex'), false);
+  const q = started.session.questions[0];
+  const result = await body(await member.request(`http://local/api/challenges/${challenge.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: q.id, question_version: q.version, answer: 1, idempotency_key: 'frozen-challenge' }) }));
+  assert.equal(result.accepted, true);
+  assert.equal(result.feedback, null);
+  assert.equal((await owner.request('http://local/api/games/sessions', { method: 'POST', body: JSON.stringify({ game_type: 'flash' }) })).status, 409);
+});
+
+test('publication rejects malformed answer keys and reading groups produce real passages and multiple questions', async () => {
+  const store = new InMemoryStore();
+  const admin = await authenticated('group-admin@example.com', store, 'admin');
+  const invalid = await store.createContent({ kind: 'word', visibility: 'public', payload: { ...legacyContent[0].payload, correct_index: 9 } });
+  assert.equal((await admin.request(`http://local/api/admin/content/${invalid.id}/publish`, { method: 'POST', body: '{}' })).status, 422);
+  const reading = await store.createContent({ kind: 'reading', visibility: 'public', payload: { title: 'Database passage', passage: 'This passage came from the content record.', source: 'Test fixture', questions: [0, 1].map(index => ({ prompt: `Question ${index}`, options: ['one', 'two'], correct_index: index, explanation: 'Test explanation' })) } });
+  await admin.request(`http://local/api/admin/content/${reading.id}/publish`, { method: 'POST', body: '{}' });
+  const created = (await body(await admin.request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ source: 'reading', content_item_id: reading.id }) }))).session;
+  assert.equal(created.questions.length, 2);
+  assert.equal(created.questions[0].passage, reading.payload.passage);
+  for (const [index, q] of created.questions.entries()) {
+    const answer = await body(await admin.request(`http://local/api/sessions/${created.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: q.id, question_version: q.version, answer: index, idempotency_key: `group-${index}` }) }));
+    assert.equal(answer.feedback.correct, true);
+  }
+  assert.equal((await admin.request(`http://local/api/sessions/${created.id}/finish`, { method: 'POST' })).status, 200);
+  assert.ok([...store.reviews.values()].some(review => review.contentItemId === reading.id));
+  assert.ok([...store.reviews.values()].every(review => !review.contentItemId.includes(':')));
+});
+
+test('due reviews select only due published words and do not silently fall back to new words', async () => {
+  const store = new InMemoryStore();
+  const learner = await authenticated('due-bank@example.com', store);
+  const user = (await body(await learner.request('http://local/api/me'))).user;
+  const start = () => learner.request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ source: 'due_reviews' }) });
+  assert.equal((await start()).status, 409);
+  await store.updateReviewState(user.id, 'w-sustainable', 'meaning', false, '2020-01-01T00:00:00.000Z');
+  const session = (await body(await start())).session;
+  assert.deepEqual(session.questionIds, ['w-sustainable']);
+  await store.updateContentStatus('w-sustainable', 1, 'withdrawn');
+  assert.equal((await start()).status, 409);
+});
+
+test('pre-upgrade array sessions still resume with their original demonstration questions', async () => {
+  const store = new InMemoryStore();
+  const learner = await authenticated('legacy-bank@example.com', store);
+  const user = (await body(await learner.request('http://local/api/me'))).user;
+  const old = await store.createSession({ userId: user.id, source: 'new_words', mode: 'practice', questionIds: ['w-sustainable'] });
+  store.content.clear();
+  const resumed = await body(await learner.request(`http://local/api/sessions/${old.id}/resume`));
+  assert.equal(resumed.session.questions[0].version, 1);
+  assert.equal(resumed.session.questions[0].correctIndex, undefined);
+  assert.equal((await learner.request('http://local/api/study/sessions', { method: 'POST', body: '{}' })).status, 409);
 });
