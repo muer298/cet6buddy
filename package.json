@@ -13,7 +13,9 @@
     "db:migrate": "node --env-file-if-exists=.env server/migrate.ts",
     "admin:bootstrap": "node --env-file-if-exists=.env server/bootstrap-admin.ts",
     "content:seed": "node --env-file-if-exists=.env server/seed-pilot-content.ts",
-    "test:server": "node --test server/app.test.ts",
+    "test:server": "node --test server/app.test.ts server/learning-regression.test.ts",
+    "test:learning": "node scripts/test-learning-flow.ts",
+    "test:learning:mysql": "node --env-file-if-exists=.env scripts/test-learning-mysql.ts",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {

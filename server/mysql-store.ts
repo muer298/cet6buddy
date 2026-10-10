@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 import type { AssetRecord, AuthSessionRecord, ChallengeParticipation, ChallengeRecord, CollectionEntry, ContentRecord, DailyTaskState, GameAttemptRecord, GameSessionRecord, GameType, ImportRecord, OpenSubmission, PasswordCredential, PointEntry, ReviewSkill, ReviewState, StoredAttempt, StudySession, TeamRecord, UserAccount, UserRole } from './types.ts';
 import { dailyTaskDefinitions, nextReviewInterval, type StudyStore } from './store.ts';
@@ -207,10 +208,32 @@ export class MysqlStore implements StudyStore {
       'SELECT COALESCE(SUM(points), 0) AS total FROM point_ledger WHERE user_id = ? AND created_at >= ? AND created_at < ?', [userId, new Date(start), new Date(end)]);
     return { practicedWords: Number(words[0].total), todayPoints: Number(points[0].total) };
   }
-  private readonly pool: Pool;
+  private readonly rootPool: Pool;
+  private readonly transaction = new AsyncLocalStorage<Pool>();
+  private get pool(): Pool { return this.transaction.getStore() ?? this.rootPool; }
 
   constructor(pool: Pool) {
-    this.pool = pool;
+    this.rootPool = pool;
+  }
+
+  async atomic<T>(userId: string, operation: () => Promise<T>): Promise<T> {
+    if (this.transaction.getStore()) return operation();
+    const connection = await this.rootPool.getConnection();
+    // Existing store helpers share the outer transaction; they must not commit or release it.
+    const nested = new Proxy(connection, { get(target, key) {
+      if (['beginTransaction', 'commit', 'rollback', 'release'].includes(String(key))) return async () => {};
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const scoped = { execute: connection.execute.bind(connection), query: connection.query.bind(connection), getConnection: async () => nested } as unknown as Pool;
+    try {
+      await connection.beginTransaction();
+      await connection.execute('SELECT id FROM users WHERE id = ? FOR UPDATE', [userId]);
+      const result = await this.transaction.run(scoped, operation);
+      await connection.commit();
+      return result;
+    } catch (cause) { await connection.rollback(); throw cause; }
+    finally { connection.release(); }
   }
 
   async createSession(input: Omit<StudySession, 'id' | 'createdAt' | 'status'>): Promise<StudySession> {
@@ -592,6 +615,8 @@ export class MysqlStore implements StudyStore {
         [userId, planDate, task.key, task.target, task.points],
       );
     }
+    const due = new Set((await this.listReviews(userId, new Date().toISOString())).map(r => `${r.contentItemId}:${r.skill}`)).size;
+    await this.pool.execute(`UPDATE daily_task_progress SET target_count = LEAST(?, completed_count + ?) WHERE user_id = ? AND plan_date = ? AND task_key = 'review'`, [definitions.find(t => t.key === 'review')!.target, due, userId, planDate]);
     const [rows] = await this.pool.execute<Array<RowDataPacket & { task_key: DailyTaskState['key']; target_count: number; completed_count: number; points: number; completed_at: string | Date | null }>>(
       `SELECT task_key, target_count, completed_count, points, completed_at
          FROM daily_task_progress WHERE user_id = ? AND plan_date = ?`,
@@ -607,22 +632,18 @@ export class MysqlStore implements StudyStore {
     await this.getDailyTasks(userId, planDate, tier);
     await this.pool.execute(
       `UPDATE daily_task_progress
-          SET completed_count = LEAST(target_count, completed_count + ?),
-              completed_at = IF(completed_count + ? >= target_count, COALESCE(completed_at, UTC_TIMESTAMP(3)), completed_at)
+          SET completed_at = IF(target_count > 0 AND completed_count + ? >= target_count, COALESCE(completed_at, UTC_TIMESTAMP(3)), completed_at),
+              completed_count = LEAST(target_count, completed_count + ?)
         WHERE user_id = ? AND plan_date = ? AND task_key = ?`,
       [amount, amount, userId, planDate, taskKey],
     );
     const tasks = await this.getDailyTasks(userId, planDate, tier);
-    if (tasks.filter(task => task.required).every(task => task.completed >= task.target)) {
-      await this.pool.execute(
-        `INSERT IGNORE INTO checkins (id, user_id, checkin_date, plan_tier) VALUES (?, ?, ?, ?)`,
-        [randomUUID(), userId, planDate, tier],
-      );
-    }
     return tasks;
   }
 
   async saveOpenSubmission(input: Omit<OpenSubmission, 'id' | 'createdAt'>): Promise<OpenSubmission> {
+    const [existing] = await this.pool.execute<RowDataPacket[]>(`SELECT id, response_text, self_check_json, created_at FROM open_submissions WHERE user_id = ? AND module = ? AND prompt_id = ? AND BINARY response_text = BINARY ? LIMIT 1`, [input.userId, input.module, input.promptId, input.responseText]);
+    if (existing[0]) return { ...input, id: existing[0].id, selfCheck: typeof existing[0].self_check_json === 'string' ? JSON.parse(existing[0].self_check_json) : existing[0].self_check_json, createdAt: timestamp(existing[0].created_at), duplicate: true };
     const entry: OpenSubmission = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     await this.pool.execute(
       `INSERT INTO open_submissions (id, user_id, module, prompt_id, response_text, self_check_json, created_at)

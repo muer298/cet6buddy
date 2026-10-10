@@ -40,6 +40,8 @@
 
 返回按 Asia/Shanghai 生成的服务器日期、计划档位和五类今日任务。`earned_points` 是当日积分账本合计，不根据任务标签估算。
 
+复习目标为 `min(档位上限, 今日已完成复习 + 当前到期条目数)`，按内容与技能去重。没有到期复习时目标为 0，不阻碍打卡、不发放免费积分。
+
 ### GET /api/me/learning-summary
 
 返回当前登录账号的 `practicedWords`、`todayPoints`、`reviews`、`collections`、`mistakes`、`planTier` 和五类已发布可用内容数量 `modules`。识义/拼写的已练词汇去重；错题仅统计普通学习首次错答中未订正的作答，不揭晓挑战。
@@ -55,6 +57,8 @@
 ### POST /api/study/sessions
 
 创建个人练习会话并冻结题目列表与版本。返回给客户端的题目不包含正确答案和解析。
+
+普通新词抽题排除已有练习记录的词汇；题库耗尽返回 `QUESTION_BANK_EMPTY`。指定内容重练仍可创建会话，但不会重复计入新词进度。
 
 请求示例：
 
@@ -80,7 +84,21 @@
 
 ### POST /api/sessions/{id}/finish
 
-由服务器根据已确认作答计算正确数和得分。完成全部题目后尝试发放当天一次小游戏学习积分，`reward_key` 唯一约束防止重复发奖。
+必须完成冻结题组中的全部题目，否则返回 422 `SESSION_INCOMPLETE`，不更新任务、积分或复习间隔。完整结算按登录用户加锁，在同一事务中更新复习状态、不同新词进度、积分账本和会话完成状态。重复结算返回 `duplicate: true`，不再次执行副作用。
+
+听力/阅读按一组计输入任务；如果该内容对应技能已到期，同时计一条复习。识义和拼写独立计复习。积分每项每日一次，合计仍上限 45 分。
+
+### POST /api/spelling-attempts
+
+首次有效拼写答案使用幂等键保存。到期的拼写才增加复习进度；重复提交不会推进间隔或重复增加积分。
+
+### POST /api/open-submissions
+
+同一账号、模块、题干和去除首尾空白后的相同正文，只保存一次作品。重复保存返回原作品、`duplicate: true` 和空奖励，不重复推进输出任务。自检勾选变化不产生第二次任务进度。
+
+### 已停用的直接完成接口
+
+`POST /api/me/tasks/input/complete` 返回 410 `SESSION_REQUIRED`；`POST /api/reviews/{id}/complete` 返回 410 `GRADED_ATTEMPT_REQUIRED`。客户端不能绕过真实题组或拼写作答直接上报任务完成。
 
 ## 错误结构
 

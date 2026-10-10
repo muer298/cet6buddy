@@ -35,6 +35,7 @@ export function nextReviewInterval(previous: number, correct: boolean): number {
 }
 
 export interface StudyStore {
+  atomic<T>(userId: string, operation: () => Promise<T>): Promise<T>;
   learningActivity(userId: string): Promise<Array<StoredAttempt & { source: string; corrected: boolean }>>;
   learningTotals(userId: string, start: string, end: string): Promise<{ practicedWords: number; todayPoints: number }>;
   createSession(input: Omit<StudySession, 'id' | 'createdAt' | 'status'>): Promise<StudySession>;
@@ -101,6 +102,23 @@ export interface StudyStore {
 }
 
 export class InMemoryStore implements StudyStore {
+  private transactionTail: Promise<unknown> = Promise.resolve();
+
+  async atomic<T>(_userId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.transactionTail;
+    let release!: () => void;
+    this.transactionTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    const maps = [this.sessions, this.attempts, this.attemptsByIdempotency, this.attemptBySessionQuestion,
+      this.reviews, this.spellingAttempts, this.dailyTasks, this.openSubmissions, this.pointLedger,
+      this.checkins, this.gameSessions, this.gameAttemptMap, this.gameAttemptByKey] as Map<string, unknown>[];
+    const snapshots = maps.map(map => structuredClone(map));
+    try { return await operation(); }
+    catch (cause) {
+      maps.forEach((map, i) => { map.clear(); for (const [key, value] of snapshots[i]) map.set(key, value); });
+      throw cause;
+    } finally { release(); }
+  }
   async learningActivity(userId: string) {
     return [...this.attempts.values()].filter(a => a.userId === userId && this.sessions.get(a.sessionId)?.mode === 'practice')
       .map(a => ({ ...a, source: this.sessions.get(a.sessionId)!.source, corrected: this.corrections.has(a.id) }))
@@ -322,8 +340,12 @@ export class InMemoryStore implements StudyStore {
   async getDailyTasks(userId: string, planDate: string, tier: UserAccount['planTier']): Promise<DailyTaskState[]> {
     const key = `${userId}:${planDate}`;
     const existing = this.dailyTasks.get(key);
-    if (existing) return existing.map(task => ({ ...task }));
-    const tasks = dailyTaskDefinitions(tier).map(task => ({ ...task, completed: 0 }));
+    const tasks = existing ?? dailyTaskDefinitions(tier).map(task => ({ ...task, target: task.key === 'review' ? 0 : task.target, completed: 0 }));
+    const review = tasks.find(task => task.key === 'review')!;
+    const due = new Set((await this.listReviews(userId, new Date().toISOString())).map(r => `${r.contentItemId}:${r.skill}`)).size;
+    const cap = dailyTaskDefinitions(tier).find(task => task.key === 'review')!.target;
+    // Only currently due work plus today's completed work is required. Never erase completed credit.
+    review.target = Math.min(cap, review.completed + due);
     this.dailyTasks.set(key, tasks);
     return tasks.map(task => ({ ...task }));
   }
@@ -340,6 +362,8 @@ export class InMemoryStore implements StudyStore {
   }
 
   async saveOpenSubmission(input: Omit<OpenSubmission, 'id' | 'createdAt'>): Promise<OpenSubmission> {
+    const existing = [...this.openSubmissions.values()].find(item => item.userId === input.userId && item.module === input.module && item.promptId === input.promptId && item.responseText === input.responseText);
+    if (existing) return { ...existing, duplicate: true };
     const entry: OpenSubmission = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
     this.openSubmissions.set(entry.id, entry);
     return entry;

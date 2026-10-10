@@ -114,6 +114,7 @@ export interface DailyTaskState {
 }
 
 export interface OpenSubmission {
+  duplicate?: boolean;
   id: string;
   userId: string;
   module: 'translation' | 'writing';

@@ -37,6 +37,8 @@ function WordSession({ onFinish }: WordSessionProps) {
   const [hintVisible, setHintVisible] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [spelling, setSpelling] = useState('');
+  const [spellingSaved, setSpellingSaved] = useState(false);
+  const [spellingBusy, setSpellingBusy] = useState(false);
   const [spellingMessage, setSpellingMessage] = useState('');
   const [collectionMessage, setCollectionMessage] = useState('');
   const question = questions[index];
@@ -45,13 +47,14 @@ function WordSession({ onFinish }: WordSessionProps) {
     let active = true;
     const savedSession = localStorage.getItem(sessionStorageKey);
     const create = () => createStudySession(source, contentId);
-    const restore = savedSession ? resumeStudySession(savedSession).then(response => response.session.status === 'finished' || response.attempts.length >= response.session.questions.length ? create() : response).catch(create) : create();
+    const restore = savedSession ? resumeStudySession(savedSession) : create();
     restore
       .then(response => {
         if (!active) return;
         setSessionId(response.session.id);
         setQuestions(response.session.questions);
         setIndex('attempts' in response && Array.isArray(response.attempts) ? response.attempts.length : 0);
+        if ('attempts' in response && Array.isArray(response.attempts)) setAttempts(response.attempts);
         localStorage.setItem(sessionStorageKey, response.session.id);
         setSync('synced');
       })
@@ -94,6 +97,7 @@ function WordSession({ onFinish }: WordSessionProps) {
       setHintVisible(false);
       setSpelling('');
       setSpellingMessage('');
+      setSpellingSaved(false);
       return;
     }
     setSync('submitting');
@@ -108,6 +112,7 @@ function WordSession({ onFinish }: WordSessionProps) {
   }
 
   if (!question) {
+    if (sessionId && questions.length && attempts.length === questions.length) return <PhoneShell active="study"><DetailTop title="完成本次练习"/><p>首次答案已保存，请继续结算。</p><SyncBanner state={sync}/><button className="primary" disabled={sync === 'submitting'} onClick={next}>{sync === 'submitting' ? '正在结算…' : '重试结算'}</button></PhoneShell>;
     return <PhoneShell active="study"><DetailTop title={source === 'due_reviews' ? '到期复习' : '单词学习'} /><SyncBanner state={sync} /><div className="feature-card"><h3>{loadError ? '学习服务暂时不可用' : '正在创建学习会话'}</h3><p>{loadError || '正在冻结题目版本并读取到期复习内容…'}</p></div>{loadError && <button className="primary" onClick={() => window.location.reload()}>重新连接</button>}</PhoneShell>;
   }
 
@@ -118,13 +123,13 @@ function WordSession({ onFinish }: WordSessionProps) {
     <div className="study-card"><span className="pill mint">{source === 'due_reviews' ? '到期复习' : '单词学习'} · 识义</span><div className="word">{question.word}</div><div className="phonetic">{question.phonetic}</div><div className="hint-box"><b>{question.prompt}</b><br />{hintVisible ? (question.hint ?? '回忆常见搭配和具体语境。') : '先在脑中回忆，再选择答案。词根只作为辅助线索。'}</div></div>
     <button className="text-link" style={{ display: 'block', margin: '14px auto' }} onClick={() => void addCollection(question.contentItemId ?? question.id, question.version, 'word').then(() => setCollectionMessage('已收藏')).catch(() => setCollectionMessage('收藏失败，请重试'))}>{collectionMessage || '收藏这个单词'}</button>
     <div className="options">{question.options.map((option, optionIndex) => { const answerClass = feedback ? optionIndex === feedback.correctAnswer ? 'correct' : optionIndex === feedback.attempt.answerIndex ? 'wrong' : '' : selected === optionIndex ? 'selected' : ''; return <button disabled={Boolean(feedback)} className={`option ${answerClass}`} key={option} onClick={() => setSelected(optionIndex)}><span>{'ABCD'[optionIndex]}</span>{option}</button>; })}</div>
-    {!feedback ? <><button className="primary" disabled={selected === null || sync === 'submitting'} onClick={handleSubmit}>{sync === 'submitting' ? '提交中…' : '确认答案'}</button><button className="text-link" style={{ display: 'block', margin: '15px auto' }} onClick={() => setHintVisible(true)}>看提示后作答</button></> : <><div className={`answer-feedback ${feedback.attempt.correct ? 'is-correct' : 'is-wrong'}`}><b>{feedback.attempt.correct ? '回答正确' : '需要订正'}</b><span>{feedback.attempt.correct ? '首次答案已由服务器确认。' : `正确答案：${question.options[feedback.correctAnswer]}`}</span></div><div className="hint-box" style={{ marginTop: 10 }}>{feedback.explanation}</div><label className="field-label">独立拼写复习</label><div style={{ display: 'flex', gap: 8 }}><input className="form-input" style={{ margin: 0 }} value={spelling} onChange={event => setSpelling(event.target.value)} placeholder="输入英文单词" disabled={Boolean(spellingMessage)} /><button className="secondary" disabled={!spelling.trim() || Boolean(spellingMessage)} onClick={() => void submitSpellingAttempt(question, spelling, `${sessionId}:${question.id}:spelling`, sessionId).then(result => setSpellingMessage(result.feedback.correct ? '拼写正确' : `正确拼写：${result.feedback.correct_answer}`)).catch(cause => setSpellingMessage(cause instanceof Error ? cause.message : '拼写保存失败'))}>提交</button></div>{spellingMessage && <p className="eyebrow">{spellingMessage}</p>}<button className="primary" onClick={next} disabled={sync === 'submitting'}>{sync === 'submitting' ? '正在结算…' : index === questions.length - 1 ? '查看本次结果' : '下一词'}</button></>}
+    {!feedback ? <><button className="primary" disabled={selected === null || sync === 'submitting'} onClick={handleSubmit}>{sync === 'submitting' ? '提交中…' : '确认答案'}</button><button className="text-link" style={{ display: 'block', margin: '15px auto' }} onClick={() => setHintVisible(true)}>看提示后作答</button></> : <><div className={`answer-feedback ${feedback.attempt.correct ? 'is-correct' : 'is-wrong'}`}><b>{feedback.attempt.correct ? '回答正确' : '需要订正'}</b><span>{feedback.attempt.correct ? '首次答案已由服务器确认。' : `正确答案：${question.options[feedback.correctAnswer]}`}</span></div><div className="hint-box" style={{ marginTop: 10 }}>{feedback.explanation}</div><label className="field-label">独立拼写复习</label><div style={{ display: 'flex', gap: 8 }}><input className="form-input" style={{ margin: 0 }} value={spelling} onChange={event => setSpelling(event.target.value)} placeholder="输入英文单词" disabled={spellingSaved || spellingBusy} /><button className="secondary" disabled={!spelling.trim() || spellingSaved || spellingBusy} onClick={() => { setSpellingBusy(true); void submitSpellingAttempt(question, spelling, `${sessionId}:${question.id}:spelling`, sessionId).then(result => { setSpellingSaved(true); setSpellingMessage(result.feedback.correct ? '拼写正确' : `正确拼写：${result.feedback.correct_answer}`); }).catch(cause => setSpellingMessage(cause instanceof Error ? cause.message : '拼写保存失败，请重试')).finally(() => setSpellingBusy(false)); }}>提交</button></div>{spellingMessage && <p className="eyebrow">{spellingMessage}</p>}<button className="primary" onClick={next} disabled={sync === 'submitting'}>{sync === 'submitting' ? '正在结算…' : index === questions.length - 1 ? '查看本次结果' : '下一词'}</button></>}
   </PhoneShell>;
 }
 
 function ResultPage({ result, onRestart }: { result: SessionResult | null; onRestart: () => void }) {
   if (!result) return <PhoneShell noNav><div className="feature-card"><h3>暂时没有练习结果</h3><p>完成一组单词复习后，这里会显示首次正确率和订正建议。</p></div><button className="primary" onClick={() => go('word')}>开始复习</button></PhoneShell>;
-  return <PhoneShell noNav><div style={{ textAlign: 'center', paddingTop: 40 }}><div style={{ fontSize: 70 }}>{result.correct === result.total ? '🎉' : '🌱'}</div><p className="eyebrow">本组已由服务器确认</p><h1 style={{ fontSize: 30, margin: 8 }}>{result.correct} / {result.total} 题正确</h1><p style={{ color: 'var(--muted)' }}>单词识义 · {result.score} 局内分</p></div><div className="metric-row" style={{ marginTop: 28 }}><div className="metric"><strong>{result.score}</strong><small>本组得分</small></div><div className="metric"><strong>{Math.round(result.correct / result.total * 100)}%</strong><small>首次正确率</small></div><div className="metric"><strong>{result.needsReview.length}</strong><small>需要复习</small></div></div>{result.reward && <SyncBanner state="synced" />}<div className="feature-card"><h3>下一步建议</h3><p>{result.needsReview.length ? `先订正 ${result.needsReview.join('、')}，它们会回到短间隔复习队列。` : '本组全部正确。明天仍会按复习间隔安排回忆，避免只凭熟悉感判断掌握。'}</p>{result.reward && <p><b>{result.reward.awarded ? `今日小游戏学习积分 +${result.reward.points}` : '今日小游戏奖励已领取，不重复发放'}</b></p>}</div><button className="primary" onClick={onRestart}>再练一组</button><button className="secondary" style={{ width: '100%', marginTop: 10 }} onClick={() => go('today')}>返回今日</button></PhoneShell>;
+  return <PhoneShell noNav><div style={{ textAlign: 'center', paddingTop: 40 }}><div style={{ fontSize: 70 }}>{result.correct === result.total ? '🎉' : '🌱'}</div><p className="eyebrow">本组已由服务器确认</p><h1 style={{ fontSize: 30, margin: 8 }}>{result.correct} / {result.total} 题正确</h1><p style={{ color: 'var(--muted)' }}>单词识义 · {result.score} 局内分</p></div><div className="metric-row" style={{ marginTop: 28 }}><div className="metric"><strong>{result.score}</strong><small>本组得分</small></div><div className="metric"><strong>{Math.round(result.correct / result.total * 100)}%</strong><small>首次正确率</small></div><div className="metric"><strong>{result.needsReview.length}</strong><small>需要复习</small></div></div>{result.reward && <SyncBanner state="synced" />}<div className="feature-card"><h3>下一步建议</h3><p>{result.needsReview.length ? `先订正 ${result.needsReview.join('、')}，它们会回到短间隔复习队列。` : '本组全部正确。明天仍会按复习间隔安排回忆，避免只凭熟悉感判断掌握。'}</p>{result.reward && <p><b>{result.reward.awarded ? `今日学习积分 +${result.reward.points}` : result.reward.reason ?? '今日该项任务积分已领取，不重复发放'}</b></p>}</div><button className="primary" onClick={onRestart}>再练一组</button><button className="secondary" style={{ width: '100%', marginTop: 10 }} onClick={() => go('today')}>返回今日</button></PhoneShell>;
 }
 
 function LearningDetail({ route }: { route: Route }) {
@@ -146,6 +151,9 @@ function LearningDetail({ route }: { route: Route }) {
   const inputQuestion = inputQuestions[inputIndex] ?? null;
   const [correctIndex, setCorrectIndex] = useState<number | null>(null);
   const [inputExplanation, setInputExplanation] = useState('');
+  const [inputBusy, setInputBusy] = useState(false);
+  const [finishPending, setFinishPending] = useState(false);
+  const inputStorageKey = `cet6:${user?.id}:input:${route}:${routeParams().get('content') ?? ''}`;
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -167,7 +175,21 @@ function LearningDetail({ route }: { route: Route }) {
     setSubmitted(false);
     setInputExplanation('');
     setInputQuestions([]); setInputIndex(0); setCorrectIndex(null);
-    createStudySession(route, routeParams().get('content') ?? undefined).then(result => { setInputSessionId(result.session.id); setInputQuestions(result.session.questions); }).catch(cause => setSaved(cause instanceof Error ? cause.message : '题目加载失败。'));
+    let active = true;
+    const create = () => createStudySession(route, routeParams().get('content') ?? undefined);
+    const savedId = localStorage.getItem(inputStorageKey);
+    const load = savedId ? resumeStudySession(savedId) : create();
+    load.then(result => {
+      if (!active) return;
+      setInputSessionId(result.session.id); setInputQuestions(result.session.questions);
+      localStorage.setItem(inputStorageKey, result.session.id);
+      if ('attempts' in result && Array.isArray(result.attempts)) {
+        const count = result.attempts.length;
+        setInputIndex(Math.min(count, result.session.questions.length - 1));
+        if (count === result.session.questions.length) { setSubmitted(true); setFinishPending(true); setSaved('首次答案已保存，请继续结算。'); }
+      }
+    }).catch(cause => { if (active) setSaved(cause instanceof Error ? cause.message : '题目加载失败。'); });
+    return () => { active = false; };
   }, [route]);
   function toggleListening() {
     const audio = audioRef.current;
@@ -177,24 +199,43 @@ function LearningDetail({ route }: { route: Route }) {
     audio.play().then(() => setSpeaking(true)).catch(() => setSaved('音频播放失败，计时未开始；请检查网络或浏览器权限。'));
   }
 
+  async function settleInput() {
+    setFinishPending(true);
+    await finishStudySession(inputSessionId);
+    localStorage.removeItem(inputStorageKey);
+    setFinishPending(false);
+    setSaved('本组练习已结算，任务进度和统计已更新。');
+  }
+
+  async function retryInputFinish() {
+    if (inputBusy) return;
+    setInputBusy(true); setSaved('');
+    try { await settleInput(); }
+    catch (cause) { setSaved(cause instanceof Error ? cause.message : '结算失败，请重试。'); }
+    finally { setInputBusy(false); }
+  }
+
   async function submitInputAnswer() {
-    if (!inputSessionId || !inputQuestion || selected === null) return;
+    if (!inputSessionId || !inputQuestion || selected === null || inputBusy || submitted) return;
+    setInputBusy(true); setSaved('');
     try {
       const result = await submitSessionAnswer(inputSessionId, inputQuestion, selected, `${inputSessionId}:${inputQuestion.id}`);
       setSubmitted(true);
       setCorrectIndex(result.feedback?.correct_answer ?? null);
       setInputExplanation(result.feedback?.explanation ?? '首次答案已由服务器确认。');
-      if (inputIndex === inputQuestions.length - 1) await finishStudySession(inputSessionId);
+      if (inputIndex === inputQuestions.length - 1) await settleInput();
     } catch (cause) { setSaved(cause instanceof Error ? cause.message : '答案同步失败，请重试。'); }
+    finally { setInputBusy(false); }
   }
 
   const options = inputQuestion?.options ?? [];
 
   return <PhoneShell active="study"><DetailTop title={item.title} /><div className="feature-card"><span className="pill">{item.tag}</span><h3 style={{ fontSize: 22, lineHeight: 1.45, marginTop: 18 }}>{inputQuestion?.prompt ?? (saved ? '当前内容不可用' : '正在加载题库…')}</h3><p>{inputQuestion?.source ?? item.body}</p></div>
-    {route === 'listening' && <><div className="audio-player" style={{ marginTop: 14 }}><div className="wave">{[18, 28, 42, 22, 49, 34, 26, 45, 19, 38, 51, 29].map((height, index) => <i key={index} style={{ height }} />)}</div><div className="player-row"><button className="text-link" onClick={() => setRate(value => { const next = value === 1 ? 1.25 : value === 1.25 ? 1.5 : 1; if (audioRef.current) audioRef.current.playbackRate = next; return next; })}>{rate.toFixed(2)}×</button><button className="player-control" aria-label={speaking ? '暂停' : '播放'} onClick={toggleListening}><Icon name={speaking ? 'pause' : 'play'}/></button><button className="text-link" onClick={() => { if (audioRef.current) { audioRef.current.currentTime = 0; void audioRef.current.play().then(() => setSpeaking(true)); } }}>重播</button></div></div><div className="options">{options.map((option, index) => <button disabled={submitted} className={`option ${submitted ? index === correctIndex ? 'correct' : index === selected ? 'wrong' : '' : selected === index ? 'selected' : ''}`} key={option} onClick={() => setSelected(index)}><span>{'ABCD'[index]}</span>{option}</button>)}</div><button className="primary" disabled={!inputQuestion || selected === null || submitted} onClick={submitInputAnswer}>提交听力答案</button>{submitted && <div className="answer-feedback is-correct"><b>{selected === correctIndex ? '首次作答正确' : '已保存首次答案'}</b><span>{inputExplanation}</span></div>}</>}
-    {route === 'reading' && <><div className="segmented"><button className={showPassage ? 'active' : ''} onClick={() => setShowPassage(true)}>文章</button><button className={!showPassage ? 'active' : ''} onClick={() => setShowPassage(false)}>题目</button></div>{showPassage ? <div className="passage"><h3>{inputQuestion?.word}</h3><p style={{ whiteSpace: 'pre-wrap' }}>{inputQuestion?.passage}</p></div> : <><div className="options">{options.map((option, index) => <button disabled={submitted} className={`option ${submitted ? index === correctIndex ? 'correct' : index === selected ? 'wrong' : '' : selected === index ? 'selected' : ''}`} key={option} onClick={() => setSelected(index)}><span>{'ABCD'[index]}</span>{option}</button>)}</div><button className="primary" disabled={!inputQuestion || selected === null || submitted} onClick={submitInputAnswer}>提交阅读答案</button>{submitted && <div className="hint-box" style={{ marginTop: 12 }}><b>解析：</b> {inputExplanation}</div>}</>}</>}
+    {route === 'listening' && <><div className="audio-player" style={{ marginTop: 14 }}><div className="wave">{[18, 28, 42, 22, 49, 34, 26, 45, 19, 38, 51, 29].map((height, index) => <i key={index} style={{ height }} />)}</div><div className="player-row"><button className="text-link" onClick={() => setRate(value => { const next = value === 1 ? 1.25 : value === 1.25 ? 1.5 : 1; if (audioRef.current) audioRef.current.playbackRate = next; return next; })}>{rate.toFixed(2)}×</button><button className="player-control" aria-label={speaking ? '暂停' : '播放'} onClick={toggleListening}><Icon name={speaking ? 'pause' : 'play'}/></button><button className="text-link" onClick={() => { if (audioRef.current) { audioRef.current.currentTime = 0; void audioRef.current.play().then(() => setSpeaking(true)); } }}>重播</button></div></div><div className="options">{options.map((option, index) => <button disabled={submitted || inputBusy} className={`option ${submitted ? index === correctIndex ? 'correct' : index === selected ? 'wrong' : '' : selected === index ? 'selected' : ''}`} key={option} onClick={() => setSelected(index)}><span>{'ABCD'[index]}</span>{option}</button>)}</div><button className="primary" disabled={!inputQuestion || selected === null || submitted || inputBusy} onClick={submitInputAnswer}>提交听力答案</button>{submitted && <div className="answer-feedback is-correct"><b>{selected === correctIndex ? '首次作答正确' : '已保存首次答案'}</b><span>{inputExplanation}</span></div>}</>}
+    {route === 'reading' && <><div className="segmented"><button className={showPassage ? 'active' : ''} onClick={() => setShowPassage(true)}>文章</button><button className={!showPassage ? 'active' : ''} onClick={() => setShowPassage(false)}>题目</button></div>{showPassage ? <div className="passage"><h3>{inputQuestion?.word}</h3><p style={{ whiteSpace: 'pre-wrap' }}>{inputQuestion?.passage}</p></div> : <><div className="options">{options.map((option, index) => <button disabled={submitted || inputBusy} className={`option ${submitted ? index === correctIndex ? 'correct' : index === selected ? 'wrong' : '' : selected === index ? 'selected' : ''}`} key={option} onClick={() => setSelected(index)}><span>{'ABCD'[index]}</span>{option}</button>)}</div><button className="primary" disabled={!inputQuestion || selected === null || submitted || inputBusy} onClick={submitInputAnswer}>提交阅读答案</button>{submitted && <div className="hint-box" style={{ marginTop: 12 }}><b>解析：</b> {inputExplanation}</div>}</>}</>}
     {submitted && inputQuestion && inputIndex < inputQuestions.length - 1 && <button className="primary" onClick={() => { setInputIndex(inputIndex + 1); setSelected(null); setSubmitted(false); setCorrectIndex(null); setInputExplanation(''); }}>下一题（{inputIndex + 2}/{inputQuestions.length}）</button>}
-    {saved && <div className="sync-bar" style={{ marginTop: 12 }}><b>✓</b><span>{saved}</span></div>}
+    {finishPending && <button className="primary" disabled={inputBusy} onClick={retryInputFinish}>{inputBusy ? '正在结算…' : '重试结算'}</button>}
+    {saved && <div className="sync-bar" role="status" style={{ marginTop: 12 }}><span>{saved}</span></div>}
     <button className="text-link" disabled={!inputQuestion} style={{ display: 'block', margin: '16px auto' }} onClick={() => addCollection(inputQuestion?.contentItemId ?? '', inputQuestion?.version ?? 1, route).then(() => setSaved('已加入个人收藏。')).catch(() => setSaved('收藏失败，请稍后重试。'))}>☆ 收藏本条内容</button>
   </PhoneShell>;
 }

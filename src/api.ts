@@ -124,7 +124,7 @@ export function createStudySession(source = 'new_words', contentItemId?: string)
   });
 }
 
-export function resumeStudySession(sessionId: string): Promise<StudySessionResponse & { attempts: Array<{ questionId: string }> }> {
+export function resumeStudySession(sessionId: string): Promise<StudySessionResponse & { attempts: import('./types').Attempt[] }> {
   return request(`/api/sessions/${sessionId}/resume`);
 }
 

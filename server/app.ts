@@ -160,13 +160,8 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
 
     const taskCompleteMatch = path.match(/^\/api\/me\/tasks\/(input)\/complete$/);
     if (request.method === 'POST' && taskCompleteMatch) {
-      const user = await auth.requireUser(request);
-      const date = shanghaiDate();
-      const tier = await store.getPlanTier(user.id, date);
-      const tasks = await store.incrementDailyTask(user.id, date, 'input', 1, tier);
-      const task = tasks.find(item => item.key === 'input')!;
-      const reward = task.completed >= task.target ? await store.awardPoints(user.id, `${user.id}:input:${date}`, task.points, '完成听力或阅读任务') : null;
-      return json({ task, reward: reward ? { points: reward.entry.points, awarded: reward.awarded } : null }, 200, undefined, corsOrigin);
+      await auth.requireUser(request);
+      return error('SESSION_REQUIRED', '请完成听力或阅读题组，由服务器结算任务。', 410, undefined, corsOrigin);
     }
 
     if (request.method === 'GET' && path === '/api/me/reviews') {
@@ -178,14 +173,8 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
 
     const reviewMatch = path.match(/^\/api\/reviews\/([^/]+)\/complete$/);
     if (request.method === 'POST' && reviewMatch) {
-      const user = await auth.requireUser(request);
-      const body = await readJson(request);
-      const skill = body?.skill;
-      if (!['meaning', 'spelling', 'listening', 'reading', 'output'].includes(String(skill))) return error('INVALID_REVIEW_SKILL', '复习类型无效。', 422, undefined, corsOrigin);
-      if (typeof body?.correct !== 'boolean') return error('INVALID_REVIEW_RESULT', '复习结果无效。', 422, undefined, corsOrigin);
-      const review = await store.updateReviewState(user.id, reviewMatch[1], skill as 'meaning' | 'spelling' | 'listening' | 'reading' | 'output', body.correct, new Date().toISOString());
-      await store.incrementDailyTask(user.id, shanghaiDate(), 'review', 1, await store.getPlanTier(user.id, shanghaiDate()));
-      return json({ review }, 200, undefined, corsOrigin);
+      await auth.requireUser(request);
+      return error('GRADED_ATTEMPT_REQUIRED', '请通过学习题组或拼写作答完成复习，不能直接上报完成。', 410, undefined, corsOrigin);
     }
 
     if (request.method === 'GET' && path === '/api/me/learning-summary') {
@@ -257,8 +246,18 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       if (!question || body?.content_version !== question.version || typeof body.answer_text !== 'string' || typeof body.idempotency_key !== 'string') return error('INVALID_SPELLING_ATTEMPT', '拼写作答信息无效或题目已下架。', 422, undefined, corsOrigin);
       const answer = body.answer_text.trim().toLowerCase();
       const correct = answer === question.word.toLowerCase();
+      const now = new Date().toISOString();
+      const due = (await store.listReviews(user.id, now)).some(r => r.contentItemId === question.id && r.skill === 'spelling');
       const saved = await store.saveSpellingAttempt({ userId: user.id, contentItemId: question.id, contentVersion: question.version, answerText: body.answer_text.trim(), correct, idempotencyKey: body.idempotency_key });
-      if (!saved.duplicate) await store.updateReviewState(user.id, question.id, 'spelling', saved.correct, new Date().toISOString());
+      if (!saved.duplicate) {
+        const tier = await store.getPlanTier(user.id, shanghaiDate());
+        if (due) await store.incrementDailyTask(user.id, shanghaiDate(), 'review', 1, tier);
+        await store.updateReviewState(user.id, question.id, 'spelling', saved.correct, now);
+        if (due) {
+          const task = (await store.getDailyTasks(user.id, shanghaiDate(), tier)).find(t => t.key === 'review')!;
+          if (task.target > 0 && task.completed >= task.target) await store.awardPoints(user.id, `${user.id}:review:${shanghaiDate()}`, task.points, '完成到期复习任务');
+        }
+      }
       return json({ accepted: true, duplicate: saved.duplicate, attempt_id: saved.id, feedback: { correct: saved.correct, correct_answer: question.word } }, 200, undefined, corsOrigin);
     }
 
@@ -267,6 +266,7 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const body = await readJson(request);
       if (!body || (body.module !== 'translation' && body.module !== 'writing') || typeof body.prompt_id !== 'string' || typeof body.response_text !== 'string' || !body.response_text.trim()) return error('INVALID_OPEN_SUBMISSION', '开放表达内容不完整。', 422, undefined, corsOrigin);
       const submission = await store.saveOpenSubmission({ userId: user.id, module: body.module, promptId: body.prompt_id, responseText: body.response_text.trim(), selfCheck: typeof body.self_check === 'object' && body.self_check ? body.self_check as Record<string, boolean> : {} });
+      if (submission.duplicate) return json({ submission, duplicate: true, reward: null }, 200, undefined, corsOrigin);
       const tier = await store.getPlanTier(user.id, shanghaiDate());
       const tasks = await store.incrementDailyTask(user.id, shanghaiDate(), 'output', 1, tier);
       const outputTask = tasks.find(task => task.key === 'output');
@@ -614,11 +614,16 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const kind = source === 'listening' || source === 'reading' ? source : 'word';
       let pool = await publishedQuestions(store, kind, user.id);
       if (typeof body.content_item_id === 'string') pool = pool.filter(q => q.contentItemId === body.content_item_id);
+      if (source === 'new_words' && !body.content_item_id) {
+        const learned = new Set((await store.learningActivity(user.id)).map(a => a.questionId));
+        for (const review of await store.listReviews(user.id, '9999-01-01T00:00:00Z')) if (['meaning', 'spelling'].includes(review.skill)) learned.add(review.contentItemId);
+        pool = pool.filter(q => !learned.has(q.contentItemId ?? q.id));
+      }
       if (source === 'due_reviews') {
         const due = new Set((await store.listReviews(user.id, new Date().toISOString())).map(r => r.contentItemId));
         pool = pool.filter(q => due.has(q.contentItemId ?? q.id));
       }
-      if (!pool.length) return error('QUESTION_BANK_EMPTY', source === 'due_reviews' ? '当前没有到期的已发布单词，可先学习新词。' : '当前没有可用的已发布题目，请在内容后台录入并发布。', 409, undefined, corsOrigin);
+      if (!pool.length) return error('QUESTION_BANK_EMPTY', source === 'due_reviews' ? '当前没有到期的已发布单词，可先学习新词。' : source === 'new_words' ? '当前可用的新词已学完，可到学习中心复习或等待题库更新。' : '当前没有可用的已发布题目，请在内容后台录入并发布。', 409, undefined, corsOrigin);
       const selectedQuestions = kind === 'word' ? sampleQuestions(pool, 5) : (() => { const first = sampleQuestions(pool, 1)[0]; return pool.filter(q => q.contentItemId === first.contentItemId); })();
       const session = await store.createSession({ userId: user.id, source, mode, ...freezeQuestions(selectedQuestions) });
       return json({ session: { ...session, questions: selectedQuestions.map(publicQuestion) } }, 201, undefined, corsOrigin);
@@ -675,29 +680,43 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const session = await store.getSession(finishMatch[1]);
       if (!session || session.userId !== user.id) return error('SESSION_NOT_FOUND', '没有找到该学习会话。', 404, undefined, corsOrigin);
       const attempts = await store.attemptsForSession(session.id);
-      if (!attempts.length) return error('NO_ANSWERS', '至少提交一道题后才能结算。', 422);
-      await store.finishSession(session.id);
+      if (attempts.length !== session.questionIds.length || !session.questionIds.every(id => attempts.some(a => a.questionId === id))) return error('SESSION_INCOMPLETE', '完成全部题目后才能结算。', 422);
       const correct = attempts.filter(attempt => attempt.correct).length;
-      const finishedAll = attempts.length === session.questionIds.length;
+      const result = { answered: attempts.length, total: session.questionIds.length, correct, score: correct * 10 };
+      if (session.status === 'finished') return json({ session_id: session.id, status: 'finished', result, duplicate: true, reward: { points: 0, awarded: false, reason: '本次练习已结算，进度和积分不会重复增加' } }, 200, undefined, corsOrigin);
       const now = new Date().toISOString();
+      const date = shanghaiDate(new Date(now));
+      const tier = await store.getPlanTier(user.id, date);
       const reviewSkill = session.source === 'listening' ? 'listening' : session.source === 'reading' ? 'reading' : 'meaning';
       const frozen = await sessionQuestions(store, session);
+      const due = new Set((await store.listReviews(user.id, now)).filter(r => r.skill === reviewSkill).map(r => r.contentItemId));
+      const contentIds = new Set(frozen.map(q => q.contentItemId ?? q.id));
+      const reviewed = [...contentIds].filter(id => due.has(id)).length;
+      if (reviewed) await store.incrementDailyTask(user.id, date, 'review', reviewed, tier);
       for (const contentId of new Set(frozen.map(q => q.contentItemId ?? q.id))) {
         const ids = new Set(frozen.filter(q => (q.contentItemId ?? q.id) === contentId).map(q => q.id));
         const answered = attempts.filter(a => ids.has(a.questionId));
         if (answered.length) await store.updateReviewState(user.id, contentId, reviewSkill, answered.length === ids.size && answered.every(a => a.correct), now);
       }
       const taskKey = session.source === 'new_words' ? 'new_words' : session.source === 'game' ? 'game' : session.source === 'listening' || session.source === 'reading' ? 'input' : 'review';
-      const tier = await store.getPlanTier(user.id, shanghaiDate());
-      const tasks = await store.incrementDailyTask(user.id, shanghaiDate(), taskKey, attempts.length, tier);
+      // The user lock makes the first completed session claim each distinct word exactly once.
+      const activity = (await store.learningActivity(user.id)).filter(a => contentIds.has(a.questionId) && a.sessionId !== session.id);
+      const prior = new Map(await Promise.all([...new Set(activity.map(a => a.sessionId))].map(async id => [id, await store.getSession(id)] as const)));
+      const learned = new Set(activity.filter(a => prior.get(a.sessionId)?.status === 'finished').map(a => a.questionId));
+      const newWords = [...contentIds].filter(id => !learned.has(id)).length;
+      if (taskKey !== 'review') await store.incrementDailyTask(user.id, date, taskKey, taskKey === 'new_words' ? newWords : 1, tier);
+      const tasks = await store.getDailyTasks(user.id, date, tier);
       const task = tasks.find(item => item.key === taskKey);
-      const rewardKey = `${user.id}:${taskKey}:${shanghaiDate()}`;
-      const reward = finishedAll && task && task.completed >= task.target ? await store.awardPoints(user.id, rewardKey, task.points, `完成${task.title}任务`) : null;
+      const rewardKey = `${user.id}:${taskKey}:${date}`;
+      const reward = task && task.target > 0 && task.completed >= task.target ? await store.awardPoints(user.id, rewardKey, task.points, `完成${task.title}任务`) : null;
+      const reviewTask = tasks.find(item => item.key === 'review')!;
+      if (reviewed && taskKey !== 'review' && reviewTask.target > 0 && reviewTask.completed >= reviewTask.target) await store.awardPoints(user.id, `${user.id}:review:${date}`, reviewTask.points, '完成到期复习任务');
+      await store.finishSession(session.id);
       return json({
         session_id: session.id,
         status: 'finished',
-        result: { answered: attempts.length, total: session.questionIds.length, correct, score: correct * 10 },
-        reward: reward ? { points: reward.entry.points, awarded: reward.awarded, reward_key: reward.entry.rewardKey } : { points: 0, awarded: false, reason: '练习尚未完成全部题目' },
+        result,
+        reward: reward ? { points: reward.entry.points, awarded: reward.awarded, reward_key: reward.entry.rewardKey } : { points: 0, awarded: false, reason: '练习已保存，今日该项任务尚未达到目标' },
       }, 200, undefined, corsOrigin);
     }
 
@@ -706,6 +725,15 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
 
   async function handle(request: Request): Promise<Response> {
     try {
+      const path = new URL(request.url).pathname;
+      const transactional = request.method !== 'OPTIONS' && (
+        /^\/api\/sessions\/[^/]+\/(answers|finish)$/.test(path) ||
+        /^\/api\/game-sessions\/[^/]+\/(answers|finish)$/.test(path) ||
+        ['/api/spelling-attempts', '/api/open-submissions', '/api/me/plan', '/api/me/checkin'].includes(path));
+      if (transactional) {
+        const user = await auth.requireUser(request);
+        return await store.atomic(user.id, () => route(request));
+      }
       return await route(request);
     } catch (cause) {
       if (cause instanceof AuthError) return error(cause.code, cause.message, cause.status, undefined, corsOrigin);
