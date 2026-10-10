@@ -1,4 +1,5 @@
 import { contentErrors, freezeQuestions, publicQuestion, publishedQuestions, questionsFromContent, sampleQuestions, sessionQuestions } from './question-bank.ts';
+import { availableContent, learningKinds, learningRecords } from './learning-dashboard.ts';
 import { AuthError, AuthService, authOptionsFromEnv, type AuthRuntimeOptions } from './auth.ts';
 import { InMemoryStore, type StudyStore } from './store.ts';
 import { createCosDownloadUrl, createCosUploadGrant, readLocalAsset, saveLocalFile, UploadError, validateUploadMetadata, verifyCosObject } from './upload.ts';
@@ -9,6 +10,7 @@ function json(data: unknown, status = 200, extraHeaders?: HeadersInit, corsOrigi
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'private, no-store',
       'access-control-allow-origin': corsOrigin,
       'access-control-allow-credentials': 'true',
       'access-control-allow-headers': 'content-type, authorization, idempotency-key',
@@ -118,7 +120,10 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const planDate = shanghaiDate();
       const planTier = await store.getPlanTier(user.id, planDate);
       const tasks = await store.getDailyTasks(user.id, planDate, planTier);
+      const start = new Date(`${planDate}T00:00:00+08:00`);
+      const totals = await store.learningTotals(user.id, start.toISOString(), new Date(start.getTime() + 86400000).toISOString());
       return json({
+        earned_points: totals.todayPoints,
         server_date: planDate,
         timezone: 'Asia/Shanghai',
         plan_tier: planTier,
@@ -183,6 +188,36 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       return json({ review }, 200, undefined, corsOrigin);
     }
 
+    if (request.method === 'GET' && path === '/api/me/learning-summary') {
+      const user = await auth.requireUser(request);
+      const date = shanghaiDate();
+      const start = new Date(`${date}T00:00:00+08:00`);
+      const [content, reviews, collections, activity, totals, tier] = await Promise.all([
+        availableContent(store, user.id), store.listReviews(user.id, new Date().toISOString()), store.listCollections(user.id), store.learningActivity(user.id),
+        store.learningTotals(user.id, start.toISOString(), new Date(start.getTime() + 86400000).toISOString()), store.getPlanTier(user.id, date),
+      ]);
+      return json({ ...totals, planTier: tier, reviews: new Set(reviews.map(r => `${r.contentItemId}:${r.skill}`)).size, collections: collections.length,
+        mistakes: activity.filter(a => !a.correct && !a.corrected).length,
+        modules: Object.fromEntries(learningKinds.map(kind => [kind, content.filter(c => c.kind === kind).length])),
+      }, 200, undefined, corsOrigin);
+    }
+
+    if (request.method === 'GET' && path === '/api/me/learning-items') {
+      const user = await auth.requireUser(request);
+      const filter = url.searchParams.get('filter') ?? 'reviews';
+      if (!['reviews', 'collections', 'mistakes'].includes(filter)) return error('INVALID_FILTER', '列表类型无效。', 422, undefined, corsOrigin);
+      return json(pageOf<unknown>(await learningRecords(store, user.id, filter), url), 200, undefined, corsOrigin);
+    }
+
+    if (request.method === 'GET' && path === '/api/learning/output') {
+      const user = await auth.requireUser(request);
+      const kind = url.searchParams.get('kind');
+      if (kind !== 'translation' && kind !== 'writing') return error('INVALID_KIND', '内容类型无效。', 422, undefined, corsOrigin);
+      const content = (await store.listPublishedContent(kind, user.id)).filter(c => !contentErrors(c.kind, c.payload).length);
+      const selected = url.searchParams.get('content');
+      return json(pageOf((selected ? content.filter(c => c.id === selected) : content).map(c => ({ id: c.id, version: c.version, prompt: c.payload.prompt, references: c.payload.references, source: c.payload.source })), url), 200, undefined, corsOrigin);
+    }
+
     if (request.method === 'GET' && path === '/api/collections') {
       const user = await auth.requireUser(request);
       const result = pageOf(await store.listCollections(user.id, url.searchParams.get('kind') ?? undefined), url);
@@ -202,6 +237,12 @@ export function createApp(store: StudyStore = new InMemoryStore(), options: AppO
       const user = await auth.requireUser(request);
       const body = await readJson(request);
       if (!body || !('answer' in body)) return error('INVALID_CORRECTION', '订正答案不能为空。', 422, undefined, corsOrigin);
+      const attempt = (await store.learningActivity(user.id)).find(a => a.id === correctionMatch[1]);
+      if (!attempt || attempt.correct) return error('ATTEMPT_NOT_FOUND', '没有找到可订正的练习作答。', 404, undefined, corsOrigin);
+      const study = await store.getSession(attempt.sessionId);
+      const question = study ? (await sessionQuestions(store, study)).find(q => q.id === attempt.questionId) : undefined;
+      if (!question) return error('QUESTION_NOT_FOUND', '历史题目不可用。', 404, undefined, corsOrigin);
+      if (body.answer !== question.correctIndex) return error('CORRECTION_INCORRECT', '订正答案还不正确，请再回忆一次。', 422, undefined, corsOrigin);
       const saved = await store.saveCorrection(user.id, correctionMatch[1], body.answer, typeof body.self_check === 'object' && body.self_check ? body.self_check as Record<string, boolean> : undefined);
       if (!saved) return error('ATTEMPT_NOT_FOUND', '没有找到可订正的作答。', 404, undefined, corsOrigin);
       return json({ accepted: true }, 201, undefined, corsOrigin);

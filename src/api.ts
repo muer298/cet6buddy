@@ -39,6 +39,7 @@ export async function logout(): Promise<void> {
 }
 
 export interface TodayPlanResponse {
+  earned_points: number;
   server_date: string;
   timezone: string;
   plan_tier: 'light' | 'standard' | 'custom';
@@ -48,6 +49,20 @@ export interface TodayPlanResponse {
 export function getTodayPlan(): Promise<TodayPlanResponse> {
   return request('/api/me/plan');
 }
+
+export interface LearningSummary {
+  practicedWords: number; todayPoints: number; reviews: number; collections: number; mistakes: number;
+  planTier: CurrentUser['planTier']; modules: Record<string, number>;
+}
+export interface LearningItem {
+  id: string; contentId: string; kind: string; title: string; version?: number; available: boolean; date: string; skill?: string; note?: string; question?: Question;
+}
+export interface LearningList { items: LearningItem[]; pagination: { page: number; pages: number; total: number } }
+export const getLearningSummary = () => request<LearningSummary>('/api/me/learning-summary');
+export const getLearningItems = (filter: string, page = 1) => request<LearningList>(`/api/me/learning-items?filter=${filter}&page=${page}`);
+export const correctAttempt = (id: string, answer: number) => request(`/api/attempts/${id}/corrections`, { method: 'POST', body: JSON.stringify({ answer }) });
+export interface OutputContent { id: string; version: number; prompt: string; references: string[]; source: string }
+export const getOutputContent = (kind: string, content = '') => request<{ items: OutputContent[] }>(`/api/learning/output?kind=${kind}&content=${encodeURIComponent(content)}`);
 
 export function updatePlan(planTier: TodayPlanResponse['plan_tier'], examDate?: string): Promise<{ effective_date: string }> {
   return request('/api/me/plan', { method: 'PUT', body: JSON.stringify({ plan_tier: planTier, exam_date: examDate }) });
@@ -102,10 +117,10 @@ export interface FinishResponse {
   reward: { points: number; awarded: boolean; reward_key?: string; reason?: string };
 }
 
-export function createStudySession(source = 'new_words'): Promise<StudySessionResponse> {
+export function createStudySession(source = 'new_words', contentItemId?: string): Promise<StudySessionResponse> {
   return request('/api/study/sessions', {
     method: 'POST',
-    body: JSON.stringify({ source, mode: 'practice' }),
+    body: JSON.stringify({ source, content_item_id: contentItemId, mode: 'practice' }),
   });
 }
 

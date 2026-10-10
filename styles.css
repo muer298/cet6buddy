@@ -104,7 +104,7 @@ a { color: inherit; text-decoration: none; }
 .chip { flex:0 0 auto; padding:10px 14px; border:1px solid var(--line); border-radius:99px; background:white; color:var(--muted); font-size:12px; cursor:pointer; }
 .chip.active { color:white; background:var(--ink); border-color:var(--ink); }
 
-.game-card { position:relative; min-height:176px; margin-bottom:14px; padding:21px; border-radius:28px; overflow:hidden; color:white; cursor:pointer; box-shadow:var(--shadow); }
+.game-card { display:block; width:100%; text-align:left; position:relative; min-height:176px; margin-bottom:14px; padding:21px; border-radius:28px; overflow:hidden; color:white; cursor:pointer; box-shadow:var(--shadow); }
 .game-card.purple { background:linear-gradient(140deg,#745fff,#a56cff); }
 .game-card.blue { background:linear-gradient(140deg,#3d7df0,#62b3ff); }
 .game-card.orange { background:linear-gradient(140deg,#ff8d60,#ffbd6c); }
@@ -113,7 +113,22 @@ a { color: inherit; text-decoration: none; }
 .game-card p { max-width:260px; margin:0; opacity:.86; font-size:12px; line-height:1.6; }
 .game-footer { display:flex; align-items:center; justify-content:space-between; margin-top:20px; }
 .game-footer small { font-weight:700; opacity:.82; }
-.play { width:44px; height:44px; border-radius:15px; background:rgba(255,255,255,.92); color:var(--ink); cursor:pointer; }
+.play { display:grid; place-items:center; flex:0 0 44px; width:44px; height:44px; border-radius:15px; background:rgba(255,255,255,.92); color:var(--ink); font-style:normal; }
+
+.ui-icon { display:block; width:24px; height:24px; flex-shrink:0; }
+.back, .round-btn, .player-control, .sound { display:grid; place-items:center; padding:0; line-height:1; }
+.detail-spacer { width:44px; flex-shrink:0; }
+.task-copy { text-align:left; }
+.check .ui-icon { width:16px; height:16px; }
+.mini-avatar { font-style:normal; flex-shrink:0; }
+.module-card:disabled { cursor:default; opacity:.7; }
+.list-note { color:var(--muted); font-size:12px; line-height:1.7; }
+.learning-record h3 { margin:12px 0 8px; overflow-wrap:anywhere; }
+.learning-record .secondary { margin-top:12px; }
+.pagination { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:20px; }
+.pagination button { padding:12px; background:white; border-radius:12px; }
+details.feature-card summary { cursor:pointer; margin-bottom:12px; }
+.metric { color:var(--ink); }
 
 .question-progress { display:flex; gap:6px; margin:10px 0 22px; }
 .question-progress i { height:5px; flex:1; border-radius:99px; background:#e8e5ef; }
@@ -157,9 +172,9 @@ a { color: inherit; text-decoration: none; }
 .metric strong { display:block; font-size:20px; }
 .metric small { color:var(--muted); font-size:10px; }
 .leader-list { display:grid; gap:9px; }
-.leader { display:grid; grid-template-columns:32px 42px 1fr auto; align-items:center; gap:9px; padding:11px; border-radius:18px; background:white; border:1px solid var(--line); }
+.leader { display:grid; grid-template-columns:24px 32px minmax(0,1fr) auto auto; align-items:center; gap:8px; padding:11px; border-radius:18px; background:white; border:1px solid var(--line); }
 .rank { text-align:center; font-weight:900; color:var(--muted); }
-.leader strong { font-size:13px; }
+.leader strong { font-size:13px; overflow-wrap:anywhere; }
 .leader small { display:block; color:var(--muted); font-size:10px; }
 .score { color:var(--purple); font-size:14px; font-weight:900; }
 

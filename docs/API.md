@@ -38,7 +38,19 @@
 
 ### GET /api/me/plan
 
-返回按 Asia/Shanghai 生成的服务器日期、计划档位和五类今日任务。
+返回按 Asia/Shanghai 生成的服务器日期、计划档位和五类今日任务。`earned_points` 是当日积分账本合计，不根据任务标签估算。
+
+### GET /api/me/learning-summary
+
+返回当前登录账号的 `practicedWords`、`todayPoints`、`reviews`、`collections`、`mistakes`、`planTier` 和五类已发布可用内容数量 `modules`。识义/拼写的已练词汇去重；错题仅统计普通学习首次错答中未订正的作答，不揭晓挑战。
+
+### GET /api/me/learning-items
+
+`filter=reviews|collections|mistakes`，支持 `page`、`page_size`。列表仅属于当前账号；不可用内容保留记录并返回 `available: false`。正确订正后从待订正列表移除，首次成绩不变。
+
+### GET /api/learning/output
+
+`kind=translation|writing`，可选 `content` 指定内容 ID。返回当前账号可访问且校验通过的已发布题干、来源和参考表达，支持分页。
 
 ### POST /api/study/sessions
 

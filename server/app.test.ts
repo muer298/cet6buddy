@@ -14,6 +14,78 @@ async function body(response: Response): Promise<Record<string, any>> {
 
 const TEST_PASSWORD = 'Test-password-2026';
 
+test('dashboard has real zeroes, isolates accounts, and reads ledger rather than task estimates', async () => {
+  const store = new InMemoryStore();
+  const first = await authenticated('dashboard-a@example.com', store);
+  const second = await authenticated('dashboard-b@example.com', store);
+  const me = (await body(await first.request('http://local/api/me'))).user;
+  const empty = await body(await first.request('http://local/api/me/learning-summary'));
+  assert.equal(empty.practicedWords, 0);
+  assert.equal(empty.collections, 0);
+  assert.equal(empty.mistakes, 0);
+  assert.equal(empty.reviews, 0);
+  const session = (await body(await first.request('http://local/api/study/sessions', { method: 'POST', body: '{}' }))).session;
+  const question = session.questions[0];
+  const correct = questionById.get(question.id)!.correctIndex;
+  const response = await body(await first.request(`http://local/api/sessions/${session.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: (correct + 1) % question.options.length, idempotency_key: 'dashboard-wrong' }) }));
+  await store.addCollection({ userId: me.id, contentItemId: question.id, contentVersion: question.version, kind: 'word' });
+  await store.updateReviewState(me.id, question.id, 'meaning', false, '2020-01-01T00:00:00Z');
+  await store.updateReviewState(me.id, question.id, 'spelling', false, '2020-01-01T00:00:00Z');
+  await store.awardPoints(me.id, 'dashboard-reward', 3, '测试实际账本');
+  const summary = await body(await first.request('http://local/api/me/learning-summary'));
+  assert.equal(summary.practicedWords, 1);
+  assert.equal(summary.collections, 1);
+  assert.equal(summary.mistakes, 1);
+  assert.equal(summary.reviews, 2);
+  assert.equal(summary.todayPoints, 3);
+  assert.equal((await body(await first.request('http://local/api/me/plan'))).earned_points, 3);
+  const other = await body(await second.request('http://local/api/me/learning-summary?user_id=' + me.id));
+  assert.equal(other.collections + other.reviews + other.mistakes + other.practicedWords + other.todayPoints, 0);
+  const list = await body(await first.request('http://local/api/me/learning-items?filter=mistakes'));
+  assert.equal(list.items[0].title, question.word);
+  assert.equal(list.items[0].question.correctIndex, undefined);
+  assert.equal((await second.request(`http://local/api/attempts/${response.attempt_id}/corrections`, { method: 'POST', body: JSON.stringify({ answer: correct }) })).status, 404);
+  assert.equal((await first.request(`http://local/api/attempts/${response.attempt_id}/corrections`, { method: 'POST', body: JSON.stringify({ answer: (correct + 1) % question.options.length }) })).status, 422);
+  assert.equal((await first.request(`http://local/api/attempts/${response.attempt_id}/corrections`, { method: 'POST', body: JSON.stringify({ answer: correct }) })).status, 201);
+  assert.equal((await body(await first.request('http://local/api/me/learning-summary'))).mistakes, 0);
+  assert.equal((await store.attemptsForSession(session.id))[0].correct, false);
+  const page = await body(await first.request('http://local/api/me/learning-items?filter=reviews&page_size=1&page=2'));
+  assert.equal(page.pagination.total, 2);
+  assert.equal(page.items.length, 1);
+  assert.equal((await first.handle(new Request('http://local/api/me/learning-summary'))).status, 401);
+});
+
+test('dashboard excludes challenge answers and keeps unavailable collections without leaking private titles', async () => {
+  const store = new InMemoryStore();
+  const { request } = await authenticated('dashboard-private@example.com', store);
+  const user = (await body(await request('http://local/api/me'))).user;
+  const hidden = await store.createContent({ kind: 'word', ownerId: 'other-user', visibility: 'private', payload: { ...legacyContent[0].payload, word: 'PRIVATE-TITLE' } });
+  await store.updateContentStatus(hidden.id, 1, 'published', 'other-user');
+  await store.addCollection({ userId: user.id, contentItemId: hidden.id, contentVersion: 1, kind: 'word' });
+  const session = (await body(await request('http://local/api/study/sessions', { method: 'POST', body: JSON.stringify({ mode: 'challenge' }) }))).session;
+  const q = session.questions[0];
+  await request(`http://local/api/sessions/${session.id}/answers`, { method: 'POST', body: JSON.stringify({ question_id: q.id, question_version: q.version, answer: (questionById.get(q.id)!.correctIndex + 1) % q.options.length, idempotency_key: 'private-challenge' }) });
+  const result = await body(await request('http://local/api/me/learning-summary'));
+  assert.equal(result.mistakes, 0);
+  assert.equal(result.practicedWords, 0);
+  const collections = await body(await request('http://local/api/me/learning-items?filter=collections'));
+  assert.equal(collections.items[0].available, false);
+  assert.equal(JSON.stringify(collections).includes('PRIVATE-TITLE'), false);
+});
+
+test('output exercises and module counts use validated published content', async () => {
+  const store = new InMemoryStore();
+  const { request } = await authenticated('output-dashboard@example.com', store);
+  const content = await store.createContent({ kind: 'writing', visibility: 'public', payload: { prompt: 'A real published prompt', references: ['A real reference'], source: 'Original test content' } });
+  assert.equal((await body(await request('http://local/api/me/learning-summary'))).modules.writing, 0);
+  await store.updateContentStatus(content.id, 1, 'published', 'test');
+  assert.equal((await body(await request('http://local/api/me/learning-summary'))).modules.writing, 1);
+  const output = await body(await request(`http://local/api/learning/output?kind=writing&content=${content.id}`));
+  assert.equal(output.items[0].prompt, 'A real published prompt');
+  await store.updateContentStatus(content.id, 1, 'withdrawn', 'test');
+  assert.equal((await body(await request('http://local/api/me/learning-summary'))).modules.writing, 0);
+});
+
 test('question reference codec preserves both legacy arrays and frozen versions', () => {
   assert.deepEqual(decodeSelection('["legacy"]'), { questionIds: ['legacy'] });
   const selection = { questionIds: ['custom'], questionVersions: { custom: 3 } };
@@ -195,11 +267,12 @@ test('learning loop exposes plan, reviews, collections, corrections and open out
 
   const created = await body(await request('http://local/api/study/sessions', { method: 'POST', body: '{}' }));
   const question = created.session.questions[0];
+  const correctIndex = questionById.get(question.id)!.correctIndex;
   const answer = await body(await request(`http://local/api/sessions/${created.session.id}/answers`, {
-    method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: 0, idempotency_key: 'loop-answer' }),
+    method: 'POST', body: JSON.stringify({ question_id: question.id, question_version: question.version, answer: (correctIndex + 1) % question.options.length, idempotency_key: 'loop-answer' }),
   }));
   const correction = await request(`http://local/api/attempts/${answer.attempt_id}/corrections`, {
-    method: 'POST', body: JSON.stringify({ answer: 1, self_check: { meaning: true } }),
+    method: 'POST', body: JSON.stringify({ answer: correctIndex, self_check: { meaning: true } }),
   });
   assert.equal(correction.status, 201);
 

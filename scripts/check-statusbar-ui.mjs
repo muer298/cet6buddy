@@ -17,7 +17,7 @@ try {
     const path = new URL(route.request().url()).pathname;
     let body = { error: { code: 'LAYOUT_FIXTURE', message: '布局回归测试' } }, status = 409;
     if (path === '/api/me') {
-      body = authenticated ? { user: { id: 'layout-user', username: 'layout-user', nickname: '布局测试', role: 'admin', mustChangePassword: false, planTier: 'standard', timezone: 'Asia/Shanghai' } } : { error: { code: 'UNAUTHORIZED', message: '请登录' } };
+      body = authenticated ? { user: { id: 'layout-user', username: 'layout-user', email: 'layout@test.invalid', nickname: '布局测试', role: 'admin', mustChangePassword: false, planTier: 'standard', timezone: 'Asia/Shanghai' } } : { error: { code: 'UNAUTHORIZED', message: '请登录' } };
       status = authenticated ? 200 : 401;
     } else if (path === '/api/teams/me') { body = { overview: null }; status = 200; }
     else if (path === '/api/challenges') { body = { challenges: [] }; status = 200; }
@@ -31,13 +31,18 @@ try {
     await page.setViewportSize({ width, height: 844 });
     for (const route of routes) {
       authenticated = route !== 'login';
-      await page.goto(`${origin}/#${route}`, { waitUntil: 'networkidle' });
+      // Force a document navigation: hash-only changes do not re-run the login check.
+      await page.goto(`${origin}/?layout=${width}-${route}#${route}`, { waitUntil: 'networkidle' });
       if (route === 'login') await page.getByPlaceholder('请输入密码').waitFor();
-      else await page.getByText('正在恢复登录状态', { exact: true }).waitFor({ state: 'hidden' });
+      else {
+        await page.getByText('正在恢复登录状态', { exact: true }).waitFor({ state: 'hidden' });
+        assert.equal(await page.getByPlaceholder('请输入密码').count(), 0, `${route}: must be authenticated`);
+        assert.ok(await page.getByRole('heading').count(), `${route}: must render its own content`);
+      }
       assert.equal(await page.locator('.statusbar, .status-icons, .status-dot').count(), 0, `${route}: fake status bar`);
       assert.equal((await page.locator('body').innerText()).includes('09:41'), false, `${route}: fake clock`);
       if (route !== 'admin') assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${route}: overflow ${width}`);
-      if (width === 390 && ['login', 'today', 'reading'].includes(route)) await page.screenshot({ path: fileURLToPath(new URL(`${route}-390.png`, output)) });
+      if (width === 390 && ['login', 'today', 'reading'].includes(route)) await page.screenshot({ path: fileURLToPath(new URL(`${route}-390.png`, output)), animations: 'disabled' });
     }
   }
   assert.deepEqual(errors, []);

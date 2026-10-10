@@ -35,6 +35,8 @@ export function nextReviewInterval(previous: number, correct: boolean): number {
 }
 
 export interface StudyStore {
+  learningActivity(userId: string): Promise<Array<StoredAttempt & { source: string; corrected: boolean }>>;
+  learningTotals(userId: string, start: string, end: string): Promise<{ practicedWords: number; todayPoints: number }>;
   createSession(input: Omit<StudySession, 'id' | 'createdAt' | 'status'>): Promise<StudySession>;
   getSession(sessionId: string): Promise<StudySession | undefined>;
   saveAttempt(input: Omit<StoredAttempt, 'id' | 'submittedAt'>): Promise<{ attempt: StoredAttempt; duplicate: boolean }>;
@@ -99,6 +101,18 @@ export interface StudyStore {
 }
 
 export class InMemoryStore implements StudyStore {
+  async learningActivity(userId: string) {
+    return [...this.attempts.values()].filter(a => a.userId === userId && this.sessions.get(a.sessionId)?.mode === 'practice')
+      .map(a => ({ ...a, source: this.sessions.get(a.sessionId)!.source, corrected: this.corrections.has(a.id) }))
+      .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
+  }
+
+  async learningTotals(userId: string, start: string, end: string) {
+    const words = new Set((await this.learningActivity(userId)).filter(a => !a.questionId.includes(':') && !['reading', 'listening'].includes(a.source)).map(a => a.questionId));
+    for (const a of this.spellingAttempts.values()) if (a.userId === userId) words.add(a.contentItemId);
+    const todayPoints = [...this.pointLedger.values()].filter(p => p.userId === userId && p.createdAt >= start && p.createdAt < end).reduce((sum, p) => sum + p.points, 0);
+    return { practicedWords: words.size, todayPoints };
+  }
   readonly sessions = new Map<string, StudySession>();
   readonly attempts = new Map<string, StoredAttempt>();
   readonly attemptsByIdempotency = new Map<string, StoredAttempt>();

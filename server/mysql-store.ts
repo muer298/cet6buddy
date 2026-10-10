@@ -188,6 +188,25 @@ function isDuplicateKey(cause: unknown): boolean {
 }
 
 export class MysqlStore implements StudyStore {
+  async learningActivity(userId: string) {
+    const [rows] = await this.pool.execute<Array<AttemptRow & { source: string; corrected: number }>>(
+      `SELECT a.*, s.source, EXISTS(SELECT 1 FROM corrections c WHERE c.attempt_id = a.id AND c.user_id = a.user_id) AS corrected
+       FROM attempts a JOIN study_sessions s ON s.id = a.session_id
+       WHERE a.user_id = ? AND s.user_id = ? AND s.mode = 'practice' ORDER BY a.submitted_at DESC`, [userId, userId]);
+    return rows.map(row => ({ ...mapAttempt(row), source: row.source, corrected: Boolean(row.corrected) }));
+  }
+
+  async learningTotals(userId: string, start: string, end: string) {
+    const [words] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT COUNT(*) AS total FROM (
+        SELECT a.question_id AS content_id FROM attempts a JOIN study_sessions s ON s.id = a.session_id
+        WHERE a.user_id = ? AND s.user_id = ? AND s.mode = 'practice' AND s.source NOT IN ('reading', 'listening') AND a.question_id NOT LIKE '%:%'
+        UNION SELECT content_item_id FROM spelling_attempts WHERE user_id = ?
+       ) practiced`, [userId, userId, userId]);
+    const [points] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT COALESCE(SUM(points), 0) AS total FROM point_ledger WHERE user_id = ? AND created_at >= ? AND created_at < ?', [userId, new Date(start), new Date(end)]);
+    return { practicedWords: Number(words[0].total), todayPoints: Number(points[0].total) };
+  }
   private readonly pool: Pool;
 
   constructor(pool: Pool) {
